@@ -485,51 +485,42 @@ class Responses extends CI_Controller {
      * NOVO: Formatar valor da resposta baseado no tipo da pergunta
      */
     private function _format_answer_value($value, $question_type) {
-        if (empty($value)) {
+        if ($value === null || $value === '') {
             return '';
         }
-        
+        $this->load->library('excel');
+
         switch ($question_type) {
             case 'radio':
             case 'checkbox':
-                // Se é array de opções selecionadas
                 if (is_array($value)) {
                     return implode(', ', $value);
                 }
-                // Se é JSON string
                 if (is_string($value) && (strpos($value, '[') === 0 || strpos($value, '{') === 0)) {
                     $decoded = json_decode($value, true);
                     if (is_array($decoded)) {
                         return implode(', ', $decoded);
                     }
                 }
-                return strval($value);
-                
+                return trim(strval($value));
+
             case 'date':
-                if (!empty($value)) {
-                    try {
-                        return date('d/m/Y', strtotime($value));
-                    } catch (Exception $e) {
-                        return strval($value);
-                    }
-                }
-                return '';
-                
+                $iso = Excel::normalize_date($value);
+                return $iso ? date('d/m/Y', strtotime($iso)) : trim(strval($value));
+
             case 'datetime':
-                if (!empty($value)) {
-                    try {
-                        return date('d/m/Y H:i', strtotime($value));
-                    } catch (Exception $e) {
-                        return strval($value);
-                    }
-                }
-                return '';
-                
+                $iso = Excel::normalize_datetime($value);
+                return $iso ? date('d/m/Y H:i', strtotime($iso)) : trim(strval($value));
+
             case 'number':
-                return is_numeric($value) ? $value : strval($value);
-                
+                if (is_numeric($value)) return $value;
+                return Excel::normalize_number($value);
+
+            case 'text':
+            case 'textarea':
+            case 'email':
             default:
-                return strval($value);
+                return Excel::clean_text_trailing_junk(strval($value));
         }
     }
     

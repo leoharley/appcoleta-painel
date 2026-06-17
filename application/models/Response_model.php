@@ -812,66 +812,34 @@ class Response_model extends CI_Model {
 
         $answers = $this->db->get()->result();
 
+        // Garante que a Excel library está carregada (precisa para normalize_date/number)
+        $this->load->library('excel');
+
         // Indexar por question_id para acesso fácil
         $indexed_answers = array();
         foreach ($answers as $answer) {
-            // Determinar o valor da resposta
-            $value = '';
-            switch ($answer->question_type) {
-                case 'text':
-                case 'textarea':
-                    $value = $answer->response_text ?? '';
-                    break;
-                case 'number':
-                    $value = $answer->response_number ?? '';
-                    break;
-                case 'date':
-                    $value = $answer->response_date ? date('d/m/Y', strtotime($answer->response_date)) : '';
-                    break;
-                case 'datetime':
-                    $value = $answer->response_datetime ? date('d/m/Y H:i', strtotime($answer->response_datetime)) : '';
-                    break;
-                case 'radio':
-                case 'checkbox':
-                case 'select':
-                    if (!empty($answer->selected_options)) {
-                        $decoded = json_decode($answer->selected_options, true);
-
-                        // Buscar opções da pergunta para mapear valor -> label
-                        $this->db->select('option_value, option_text');
-                        $this->db->from('question_options');
-                        $this->db->where('question_id', $answer->question_id);
-                        $options = $this->db->get()->result();
-
-                        // Criar mapa valor -> label
-                        $value_to_label = array();
-                        foreach ($options as $opt) {
-                            $value_to_label[$opt->option_value] = $opt->option_text;
-                        }
-
-                        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                            // Converter valores para labels
-                            $labels = array();
-                            foreach ($decoded as $val) {
-                                $labels[] = isset($value_to_label[$val]) ? $value_to_label[$val] : $val;
-                            }
-                            $value = implode(', ', $labels);
-                        } else {
-                            // Valor único - tentar mapear para label
-                            $value = isset($value_to_label[$answer->selected_options]) ? $value_to_label[$answer->selected_options] : $answer->selected_options;
-                        }
-                    }
-                    break;
-                default:
-                    $value = $answer->response_text ?? $answer->selected_options ?? '';
+            // Anexa as opções da pergunta para radio/select/checkbox
+            $question_meta = (object)array(
+                'question_type' => $answer->question_type,
+                'options'       => array(),
+            );
+            if (in_array($answer->question_type, array('radio', 'select', 'checkbox'), true)) {
+                $opts = $this->db->select('option_value, option_text')
+                                 ->from('question_options')
+                                 ->where('question_id', $answer->question_id)
+                                 ->get()->result();
+                $question_meta->options = $opts;
             }
 
+            // Delega a escolha do campo/normalização ao helper unificado
+            $value = Excel::extract_answer_by_type($answer, $question_meta);
+
             $indexed_answers[$answer->question_id] = (object)[
-                'question_id' => $answer->question_id,
+                'question_id'   => $answer->question_id,
                 'question_text' => $answer->question_text,
                 'question_type' => $answer->question_type,
-                'order_index' => $answer->order_index,
-                'value' => $value
+                'order_index'   => $answer->order_index,
+                'value'         => $value
             ];
         }
 
@@ -2339,84 +2307,37 @@ public function validate_export_filters($filters) {
         $this->db->join('questions q', 'qr.question_id = q.id', 'left');
         $this->db->where('qr.form_response_id', $form_response_id);
         $this->db->order_by('q.order_index', 'ASC');
-        
+
         $answers = $this->db->get()->result();
-        
+        $this->load->library('excel');
+
         $structured_answers = array();
-        
+
         foreach ($answers as $answer) {
-            // Determinar o valor da resposta baseado no tipo
-            $response_value = null;
-            
-            switch ($answer->question_type) {
-                case 'text':
-                case 'textarea':
-                    $response_value = $answer->response_text;
-                    break;
-                    
-                case 'number':
-                    $response_value = $answer->response_number;
-                    break;
-                    
-                case 'date':
-                    $response_value = $answer->response_date;
-                    break;
-                    
-                case 'datetime':
-                    $response_value = $answer->response_datetime;
-                    break;
-                    
-                case 'radio':
-                case 'checkbox':
-                    $response_value = $answer->selected_options;
-                    // Tentar decodificar JSON se possível
-                    if (!empty($answer->selected_options)) {
-                        $decoded = json_decode($answer->selected_options, true);
-                        if (json_last_error() === JSON_ERROR_NONE) {
-                            $response_value = $decoded;
-                        }
-                    }
-
-                    // Mapear valores (option_value) para labels (option_text)
-                    if (!empty($response_value)) {
-                        // Buscar opções da pergunta
-                        $this->db->select('option_value, option_text');
-                        $this->db->from('question_options');
-                        $this->db->where('question_id', $answer->question_id);
-                        $options = $this->db->get()->result();
-
-                        // Criar mapa valor -> label
-                        $value_to_label = array();
-                        foreach ($options as $opt) {
-                            $value_to_label[$opt->option_value] = $opt->option_text;
-                        }
-
-                        // Converter valores para labels
-                        if (is_array($response_value)) {
-                            $labels = array();
-                            foreach ($response_value as $val) {
-                                $labels[] = isset($value_to_label[$val]) ? $value_to_label[$val] : $val;
-                            }
-                            $response_value = $labels;
-                        } else {
-                            $response_value = isset($value_to_label[$response_value]) ? $value_to_label[$response_value] : $response_value;
-                        }
-                    }
-                    break;
-                    
-                default:
-                    $response_value = $answer->response_text ?: $answer->selected_options;
-            }
-            
-            $structured_answers[] = array(
-                'question_id' => $answer->question_id,
-                'question_text' => $answer->question_text,
+            $question_meta = (object)array(
                 'question_type' => $answer->question_type,
-                'order_index' => $answer->order_index,
+                'options'       => array(),
+            );
+            if (in_array($answer->question_type, array('radio', 'select', 'checkbox'), true)) {
+                $opts = $this->db->select('option_value, option_text')
+                                 ->from('question_options')
+                                 ->where('question_id', $answer->question_id)
+                                 ->get()->result();
+                $question_meta->options = $opts;
+            }
+
+            // Usa o mesmo helper que normaliza/limpa por tipo
+            $response_value = Excel::extract_answer_by_type($answer, $question_meta);
+
+            $structured_answers[] = array(
+                'question_id'    => $answer->question_id,
+                'question_text'  => $answer->question_text,
+                'question_type'  => $answer->question_type,
+                'order_index'    => $answer->order_index,
                 'response_value' => $response_value
             );
         }
-        
+
         return json_encode($structured_answers, JSON_UNESCAPED_UNICODE);
     }
 

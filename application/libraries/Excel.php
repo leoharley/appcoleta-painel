@@ -286,47 +286,12 @@ class Excel
             $sheet->setCellValueByColumnAndRow($col++, $row, $response->longitude ?? '');
             $sheet->setCellValueByColumnAndRow($col++, $row, $response->consent_given ? 'Sim' : 'Não');
 
-            // Respostas das perguntas
+            // Respostas das perguntas — escolhe o campo certo pelo question_type
             foreach ($questions as $question) {
                 $answer = '';
                 if (isset($response->answers[$question->id])) {
                     $ans = $response->answers[$question->id];
-                    if ($ans->response_text) {
-                        $answer = $ans->response_text;
-                    } elseif ($ans->response_number !== null) {
-                        $answer = $ans->response_number;
-                    } elseif ($ans->response_date) {
-                        $answer = date('d/m/Y', strtotime($ans->response_date));
-                    } elseif ($ans->selected_options) {
-                        $options = json_decode($ans->selected_options);
-                        // Converter valores para labels
-                        if (is_array($options) && !empty($question->options)) {
-                            // Criar mapa valor -> label
-                            $value_to_label = array();
-                            foreach ($question->options as $opt) {
-                                $value_to_label[$opt->option_value] = $opt->option_text;
-                            }
-                            // Mapear valores para labels
-                            $labels = array();
-                            foreach ($options as $val) {
-                                $labels[] = isset($value_to_label[$val]) ? $value_to_label[$val] : $val;
-                            }
-                            $answer = implode(', ', $labels);
-                        } elseif (is_array($options)) {
-                            $answer = implode(', ', $options);
-                        } else {
-                            // Tentar mapear valor único
-                            if (!empty($question->options)) {
-                                $value_to_label = array();
-                                foreach ($question->options as $opt) {
-                                    $value_to_label[$opt->option_value] = $opt->option_text;
-                                }
-                                $answer = isset($value_to_label[$ans->selected_options]) ? $value_to_label[$ans->selected_options] : $ans->selected_options;
-                            } else {
-                                $answer = $ans->selected_options;
-                            }
-                        }
-                    }
+                    $answer = self::extract_answer_by_type($ans, $question);
                 }
                 $sheet->setCellValueByColumnAndRow($col++, $row, is_string($answer) ? mb_strtoupper($answer, 'UTF-8') : $answer);
             }
@@ -349,6 +314,222 @@ class Excel
         $writer = new Xlsx($spreadsheet);
         $writer->save('php://output');
         exit;
+    }
+
+    // =====================================================================
+    // Helpers de normalização — escolhem e limpam o campo certo pelo tipo
+    // da pergunta. Mantidos como `public static` para serem reaproveitados
+    // pelo Responses controller no export "Dados Brutos".
+    // =====================================================================
+
+    /**
+     * Decide qual coluna do question_responses ler e como formatar conforme
+     * o question_type da pergunta. Aplica normalizações para limpar lixo
+     * comum de digitação (datas mal formatadas, número com texto, etc.).
+     *
+     * @param object $ans      Linha de question_responses (com response_*).
+     * @param object $question Linha de questions (precisa ter question_type
+     *                         e idealmente options[] para radio/select/checkbox).
+     * @return string
+     */
+    public static function extract_answer_by_type($ans, $question) {
+        $type = isset($question->question_type) ? $question->question_type : 'text';
+
+        switch ($type) {
+            case 'text':
+            case 'textarea':
+            case 'email':
+                return self::clean_text_trailing_junk((string)($ans->response_text ?? ''));
+
+            case 'number':
+                $raw_num = (isset($ans->response_number) && $ans->response_number !== null && $ans->response_number !== '')
+                    ? (string)$ans->response_number
+                    : (string)($ans->response_text ?? '');
+                // Se parece data armazenada como número (ddmmyy/ddmmyyyy) → formata
+                $as_date = self::try_normalize_as_date($raw_num);
+                if ($as_date !== null) return $as_date;
+                return self::normalize_number($raw_num);
+
+            case 'date':
+                $iso = self::normalize_date($ans->response_date ?? null);
+                if (!$iso) $iso = self::normalize_date($ans->response_text ?? null);
+                return $iso ? date('d/m/Y', strtotime($iso)) : trim((string)($ans->response_date ?: $ans->response_text ?? ''));
+
+            case 'datetime':
+                $iso = self::normalize_datetime($ans->response_datetime ?? null);
+                if (!$iso) $iso = self::normalize_datetime($ans->response_text ?? null);
+                return $iso ? date('d/m/Y H:i', strtotime($iso)) : trim((string)($ans->response_datetime ?: $ans->response_text ?? ''));
+
+            case 'radio':
+            case 'select':
+            case 'checkbox':
+                return self::format_selected_options($ans, $question);
+
+            default:
+                return trim((string)($ans->response_text ?? ''));
+        }
+    }
+
+    /**
+     * Tenta normalizar uma string como data. Retorna data formatada dd/mm/yyyy
+     * ou null se não conseguir interpretar.
+     *
+     * Aceita:
+     *   - "28/10/1971", "28-10-1971", "28.10.1971" (com ou sem ano 4 dígitos)
+     *   - "02/08/82" (ano 2 dígitos)
+     *   - "30081992" (8 dígitos: ddmmyyyy)
+     *   - "150200"   (6 dígitos: ddmmyy)
+     *   - "28/10/1971#", "23/01/1972LIMPR", "19041996(" — limpa lixo no fim
+     */
+    public static function try_normalize_as_date($s) {
+        $s = trim((string)$s);
+        if ($s === '') return null;
+        // O valor inteiro precisa COMEÇAR com padrão de data; tolera lixo
+        // (letras, símbolos, espaços) no fim apenas.
+        if (preg_match('/^(\d{1,2}[\/\-.]\d{1,2}(?:[\/\-.]\d{1,4})?|\d{8}|\d{6})[A-Za-z#()\s\-_.]*$/u', $s, $m)) {
+            $iso = self::normalize_date($m[1]);
+            if ($iso) return date('d/m/Y', strtotime($iso));
+        }
+        return null;
+    }
+
+    /**
+     * Limpa lixo de digitação em campos de texto livre.
+     *
+     * Estratégia em duas etapas:
+     *   A) Se o valor INTEIRO parece uma data (com lixo opcional no fim) →
+     *      normaliza e devolve dd/mm/yyyy. Ex.: "28/10/1971#", "150200",
+     *      "30081992", "19041996(", "12/08/93", "02/08/82".
+     *   B) Caso contrário, remove no FIM da string:
+     *      - Fragmentos de data soltos (precedidos por espaço): " 12/", " 12/05",
+     *        " 12/08/1963", " 12-8-63"
+     *      - Sequência de 2+ dígitos colada em uma palavra: "ASSIS03" → "ASSIS"
+     *
+     * Preserva nomes legítimos sem dígitos e tokens curtos como "JOÃO 2".
+     */
+    public static function clean_text_trailing_junk($s) {
+        $s = trim((string)$s);
+        if ($s === '') return '';
+
+        // A) Valor inteiro parece data
+        $as_date = self::try_normalize_as_date($s);
+        if ($as_date !== null) return $as_date;
+
+        // B) Limpeza de lixo no fim
+        // 1) Fragmento de data com separadores precedido de espaço
+        $s = preg_replace('/\s+\d{1,2}(?:[\/\-\.]\d{0,4}){0,2}[\/\-\.]?\s*$/u', '', $s);
+        // 2) 2+ dígitos colados em palavra no fim
+        $s = preg_replace('/([\p{L}])\d{2,}\s*$/u', '$1', $s);
+
+        return trim($s);
+    }
+
+    /** Extrai a parte numérica de uma string ("R$ 1.234,56" -> "1234,56"). */
+    public static function normalize_number($v) {
+        if ($v === null) return '';
+        $s = (string)$v;
+        // Mantém apenas dígitos, vírgula, ponto, sinal
+        $clean = preg_replace('/[^\d.,\-+]/', '', $s);
+        return $clean;
+    }
+
+    /**
+     * Tenta interpretar uma data em vários formatos e retorna ISO (Y-m-d) ou null.
+     * Lida com: dd/mm/yyyy, dd-mm-yyyy, dd.mm.yyyy, yyyy-mm-dd, ddmmyyyy, ddmmyy,
+     * mais limpeza de lixo como "#" ou letras coladas no início/fim.
+     */
+    public static function normalize_date($v) {
+        if ($v === null || $v === '') return null;
+        $s = trim((string)$v);
+        if ($s === '') return null;
+
+        // Tira ruído no início/fim mantendo só números, /, -, .
+        $clean = preg_replace('/^[^\d]+|[^\d\/\-.]+$/u', '', $s);
+        if ($clean === '') $clean = $s;
+
+        $formats = array('Y-m-d', 'd/m/Y', 'd/m/y', 'd-m-Y', 'd-m-y', 'd.m.Y', 'd.m.y');
+        foreach ($formats as $fmt) {
+            $dt = DateTime::createFromFormat($fmt, $clean);
+            if ($dt && $dt->format($fmt) === $clean && self::is_valid_date($dt)) {
+                return $dt->format('Y-m-d');
+            }
+        }
+
+        // Apenas dígitos: ddmmyyyy ou ddmmyy
+        $digits = preg_replace('/\D/', '', $clean);
+        if (strlen($digits) === 8) {
+            $dt = DateTime::createFromFormat('dmY', $digits);
+            if ($dt && $dt->format('dmY') === $digits && self::is_valid_date($dt)) {
+                return $dt->format('Y-m-d');
+            }
+        }
+        if (strlen($digits) === 6) {
+            $dt = DateTime::createFromFormat('dmy', $digits);
+            if ($dt && $dt->format('dmy') === $digits && self::is_valid_date($dt)) {
+                $year = (int)$dt->format('Y');
+                // PHP interpreta "65" como 2065. Se cair muito no futuro, joga para 19xx.
+                if ($year > (int)date('Y') + 5) {
+                    $dt->modify('-100 years');
+                }
+                return $dt->format('Y-m-d');
+            }
+        }
+
+        // Último recurso
+        $ts = strtotime($clean);
+        if ($ts !== false && $ts > 0) {
+            $dt = new DateTime();
+            $dt->setTimestamp($ts);
+            if (self::is_valid_date($dt)) return $dt->format('Y-m-d');
+        }
+        return null;
+    }
+
+    public static function normalize_datetime($v) {
+        if ($v === null || $v === '') return null;
+        $s = trim((string)$v);
+        $formats = array('Y-m-d H:i:s', 'Y-m-d H:i', 'd/m/Y H:i:s', 'd/m/Y H:i', 'd/m/Y');
+        foreach ($formats as $fmt) {
+            $dt = DateTime::createFromFormat($fmt, $s);
+            if ($dt && self::is_valid_date($dt)) return $dt->format('Y-m-d H:i:s');
+        }
+        $iso = self::normalize_date($s);
+        return $iso ? $iso . ' 00:00:00' : null;
+    }
+
+    private static function is_valid_date(DateTime $dt) {
+        $y = (int)$dt->format('Y');
+        return $y >= 1900 && $y <= 2200;
+    }
+
+    /** Formata selected_options em texto legível usando option_text quando possível. */
+    public static function format_selected_options($ans, $question) {
+        $raw = isset($ans->selected_options) ? $ans->selected_options : null;
+        if (empty($raw) && !empty($ans->response_text)) $raw = $ans->response_text;
+        if (empty($raw)) return '';
+
+        $options = isset($question->options) && is_array($question->options) ? $question->options : array();
+        $value_to_label = array();
+        foreach ($options as $opt) {
+            $value_to_label[(string)$opt->option_value] = $opt->option_text;
+        }
+
+        $picked = $raw;
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) $picked = $decoded;
+        }
+
+        if (is_array($picked)) {
+            $labels = array();
+            foreach ($picked as $v) {
+                $key = (string)$v;
+                $labels[] = isset($value_to_label[$key]) ? $value_to_label[$key] : $v;
+            }
+            return implode(', ', $labels);
+        }
+        $key = (string)$picked;
+        return isset($value_to_label[$key]) ? $value_to_label[$key] : (string)$picked;
     }
 
     public function get_location_name($latitude, $longitude)

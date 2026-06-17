@@ -246,6 +246,12 @@
                 </a>
             </li>
             <li class="nav-item">
+                <a class="nav-link <?= $this->uri->segment(1) == 'charts' ? 'active' : '' ?>" href="<?= base_url('charts') ?>">
+                    <i class="fas fa-chart-bar"></i>
+                    Gráficos
+                </a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link <?= $this->uri->segment(1) == 'questionnaires' ? 'active' : '' ?>" href="<?= base_url('projects') ?>">
                     <i class="fas fa-folder-open"></i>
                     Campanhas
@@ -255,6 +261,12 @@
                 <a class="nav-link <?= $this->uri->segment(1) == 'users' ? 'active' : '' ?>" href="<?= base_url('users') ?>">
                     <i class="fas fa-user-friends"></i>
                     Equipe
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link <?= $this->uri->segment(1) == 'ai' ? 'active' : '' ?>" href="<?= base_url('ai') ?>">
+                    <i class="fas fa-brain"></i>
+                    Inteligência Artificial
                 </a>
             </li>
             <li class="nav-item">
