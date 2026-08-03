@@ -87,6 +87,13 @@ $route['stratifications/ajax_get_progress/(:num)'] = 'stratifications/ajax_get_p
 $route['api/stratification/(:num)'] = 'api/stratification/index/$1';
 
 // =====================================================================
+// Páginas institucionais públicas
+// =====================================================================
+$route['privacidade']        = 'pages/privacidade';
+$route['suporte']            = 'pages/suporte';
+$route['exclusao-de-conta']  = 'pages/exclusao_de_conta';
+
+// =====================================================================
 // Gráficos & Relatórios
 // =====================================================================
 $route['charts']                              = 'charts/index';

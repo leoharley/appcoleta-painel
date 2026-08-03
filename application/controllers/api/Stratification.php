@@ -6,14 +6,9 @@ class Stratification extends CI_Controller {
     public function __construct() {
         parent::__construct();
         $this->load->model('Stratification_model');
+        $this->load->helper('cors');
+        cors_setup();
         header('Content-Type: application/json');
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization');
-
-        if ($this->input->method() === 'options') {
-            exit();
-        }
     }
 
     /**
@@ -40,49 +35,103 @@ class Stratification extends CI_Controller {
         $applied_by = $this->input->get('applied_by');
         $applied_by = ($applied_by !== null && $applied_by !== '') ? (int)$applied_by : null;
 
-        $progress_list = $this->Stratification_model->get_all_progress_for_questionnaire(
+        // Progresso GERAL (todos os aplicadores) — sempre computa
+        $progress_geral = $this->Stratification_model->get_all_progress_for_questionnaire(
             (int)$questionnaire_id,
-            $applied_by
+            null
         );
 
+        // Progresso INDIVIDUAL do pesquisador (se solicitado)
+        $progress_mine = null;
+        if ($applied_by !== null) {
+            $progress_mine = $this->Stratification_model->get_all_progress_for_questionnaire(
+                (int)$questionnaire_id,
+                $applied_by
+            );
+        }
+
+        // Indexa o mine por stratification_id + stratum_id para lookup rápido
+        $mine_index = array();
+        if ($progress_mine !== null) {
+            foreach ($progress_mine as $p) {
+                $sid = (int)$p['stratification']->id;
+                $mine_index[$sid] = array('strata' => array(), 'categories' => array(), 'overall' => $p['overall']);
+                foreach ($p['categories'] as $cat) {
+                    $mine_index[$sid]['categories'][(int)$cat->id] = $cat;
+                    foreach ($cat->strata as $s) {
+                        $mine_index[$sid]['strata'][(int)$s->id] = $s;
+                    }
+                }
+            }
+        }
+
         $stratifications_out = array();
-        foreach ($progress_list as $progress) {
+        foreach ($progress_geral as $progress) {
+            $sid = (int)$progress['stratification']->id;
             $categories_out = array();
+
             foreach ($progress['categories'] as $cat) {
+                $mine_cat = ($progress_mine !== null && isset($mine_index[$sid]['categories'][(int)$cat->id]))
+                    ? $mine_index[$sid]['categories'][(int)$cat->id] : null;
+
                 $strata_out = array();
                 foreach ($cat->strata as $s) {
+                    $mine_stratum = ($progress_mine !== null && isset($mine_index[$sid]['strata'][(int)$s->id]))
+                        ? $mine_index[$sid]['strata'][(int)$s->id] : null;
+
+                    // Meta individual = ceil(meta_geral / total_aplicadores_ativos)
+                    // Calculada no controller aqui de forma leve: divide igualmente pelos
+                    // aplicadores atribuídos ao questionário. O app pode exibir isso como
+                    // referência; o servidor não impõe cota rígida por pesquisador.
+                    $my_target = (int)$s->target_quota;  // fallback conservador
+                    // Se quisermos dividir por total de aplicadores, precisaria de query extra.
+                    // Por ora, deixamos o app calcular a cota individual como preferir.
+
                     $strata_out[] = array(
-                        'stratum_id' => (int)$s->id,
-                        'option_value' => $s->option_value,
-                        'option_label' => $s->option_label,
-                        'target_quota' => (int)$s->target_quota,
-                        'current_count' => (int)$s->current_count,
-                        'percentage' => (float)$s->percentage,
-                        'quota_reached' => (bool)$s->quota_reached
+                        'stratum_id'      => (int)$s->id,
+                        'option_value'    => $s->option_value,
+                        'option_label'    => $s->option_label,
+                        'target_quota'    => (int)$s->target_quota,
+                        'current_count'   => (int)$s->current_count,
+                        'percentage'      => (float)$s->percentage,
+                        'quota_reached'   => (bool)$s->quota_reached,
+                        // Contadores individuais do pesquisador (quando applied_by informado)
+                        'my_current_count' => $mine_stratum !== null ? (int)$mine_stratum->current_count : null,
+                        'my_target_quota'  => $mine_stratum !== null ? $my_target : null,
+                        'my_percentage'    => $mine_stratum !== null ? (float)$mine_stratum->percentage : null,
                     );
                 }
 
                 $categories_out[] = array(
-                    'category_id' => (int)$cat->id,
-                    'category_name' => $cat->category_name,
-                    'dimension_type' => $cat->dimension_type,
-                    'question_id' => $cat->question_id !== null ? (int)$cat->question_id : null,
-                    'total_target' => (int)$cat->total_target,
-                    'total_current' => (int)$cat->total_current,
-                    'percentage' => (float)$cat->percentage,
-                    'strata' => $strata_out
+                    'category_id'     => (int)$cat->id,
+                    'category_name'   => $cat->category_name,
+                    'dimension_type'  => $cat->dimension_type,
+                    'question_id'     => $cat->question_id !== null ? (int)$cat->question_id : null,
+                    'total_target'    => (int)$cat->total_target,
+                    'total_current'   => (int)$cat->total_current,
+                    'percentage'      => (float)$cat->percentage,
+                    'my_total_current'=> $mine_cat !== null ? (int)$mine_cat->total_current : null,
+                    'my_percentage'   => $mine_cat !== null ? (float)$mine_cat->percentage : null,
+                    'strata'          => $strata_out
                 );
             }
 
+            $mine_overall = ($progress_mine !== null && isset($mine_index[$sid]['overall']))
+                ? $mine_index[$sid]['overall'] : null;
+
             $stratifications_out[] = array(
                 'stratification_id' => (int)$progress['stratification']->id,
-                'title' => $progress['stratification']->title,
-                'is_active' => (bool)$progress['stratification']->is_active,
-                'overall_progress' => array(
-                    'total_target' => (int)$progress['overall']->total_target,
+                'title'             => $progress['stratification']->title,
+                'is_active'         => (bool)$progress['stratification']->is_active,
+                'overall_progress'  => array(
+                    'total_target'  => (int)$progress['overall']->total_target,
                     'total_current' => (int)$progress['overall']->total_current,
-                    'percentage' => (float)$progress['overall']->percentage
+                    'percentage'    => (float)$progress['overall']->percentage
                 ),
+                'my_overall_progress' => $mine_overall !== null ? array(
+                    'total_current' => (int)$mine_overall->total_current,
+                    'percentage'    => (float)$mine_overall->percentage,
+                ) : null,
                 'categories' => $categories_out
             );
         }
@@ -90,9 +139,9 @@ class Stratification extends CI_Controller {
         echo json_encode([
             'success' => true,
             'data' => array(
-                'questionnaire_id' => (int)$questionnaire_id,
+                'questionnaire_id'  => (int)$questionnaire_id,
                 'applied_by_filter' => $applied_by,
-                'stratifications' => $stratifications_out
+                'stratifications'   => $stratifications_out
             )
         ]);
     }

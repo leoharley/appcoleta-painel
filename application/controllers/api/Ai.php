@@ -16,14 +16,9 @@ class Ai extends CI_Controller {
         $this->load->library('ai_service');
         $this->load->library('ai_prompt_service');
 
+        $this->load->helper('cors');
+        cors_setup();
         header('Content-Type: application/json');
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization');
-
-        if ($this->input->method() === 'options') {
-            exit();
-        }
     }
 
     // ---------------------------------------------------------------------

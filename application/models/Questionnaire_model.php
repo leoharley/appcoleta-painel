@@ -27,6 +27,21 @@ class Questionnaire_model extends CI_Model {
         return $this->db->get()->result();
     }
 
+    /**
+     * Retorna TODOS os questionários (ativos e bloqueados/inativos) para uso
+     * no painel administrativo (dropdowns de filtro, exportação, etc.) — assim
+     * o gestor continua enxergando os dados de questionários bloqueados.
+     */
+    public function get_all_for_panel() {
+        $this->db->select('q.*, u.full_name as created_by_name, p.name as project_name');
+        $this->db->from('questionnaires q');
+        $this->db->join('users u', 'q.created_by = u.id', 'left');
+        $this->db->join('projects p', 'q.project_id = p.id', 'left');
+        $this->db->order_by('q.status', 'ASC'); // active primeiro
+        $this->db->order_by('q.created_at', 'DESC');
+        return $this->db->get()->result();
+    }
+
     public function get_all_with_stats() {
         $questionnaires = $this->get_all();
         
@@ -162,14 +177,16 @@ class Questionnaire_model extends CI_Model {
         return $this->db->count_all_results('questionnaires');
     }
 
-    public function get_usage_stats() {
-        $this->db->select('q.title, COUNT(fr.id) as response_count');
+    public function get_usage_stats($limit = 30) {
+        // Contagem de entrevistas POR questionário (não agrupada).
+        // Antes limitava a 10 — pequenas campanhas somem se houver muitos ativos.
+        $this->db->select('q.id, q.title, COUNT(fr.id) as response_count');
         $this->db->from('questionnaires q');
         $this->db->join('form_responses fr', 'q.id = fr.questionnaire_id', 'left');
         $this->db->where('q.status', 'active');
         $this->db->group_by('q.id, q.title');
         $this->db->order_by('response_count', 'DESC');
-        $this->db->limit(10);
+        $this->db->limit((int)$limit);
 
         return $this->db->get()->result();
     }
@@ -194,24 +211,29 @@ class Questionnaire_model extends CI_Model {
     }
 
     private function get_questions_with_options($questionnaire_id) {
-        // Primeiro, buscar as questões
+        // Primeiro, buscar as questões — só ativas (soft-delete via is_active=0
+        // preserva o histórico de respostas mas remove do app do coletor).
         $this->db->select('*');
         $this->db->from('questions');
         $this->db->where('questionnaire_id', $questionnaire_id);
+        $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
         $this->db->order_by('order_index', 'ASC');
-        
+
         $questions = $this->db->get()->result();
         
-        // Para cada questão, buscar suas opções
+        // Para cada questão, buscar suas opções (só ativas — o soft-delete
+        // preserva opções antigas para respostas históricas, mas o app
+        // não deve exibi-las nas novas coletas).
         foreach ($questions as &$question) {
             $this->db->select('*');
             $this->db->from('question_options');
             $this->db->where('question_id', $question->id);
+            $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
             $this->db->order_by('order_index', 'ASC');
-            
+
             $question->options = $this->db->get()->result();
         }
-        
+
         return $questions;
     }
 
@@ -1377,7 +1399,7 @@ class Questionnaire_model extends CI_Model {
             fr.completed_at,
             fr.sync_status,
             q.title as questionnaire_title,
-            CONCAT(\'#\', LPAD(q.id::text, 3, \'0\')) as questionnaire_code
+            CONCAT(\'#\', LPAD(CAST(q.id AS CHAR), 3, \'0\')) as questionnaire_code
         ');
         $this->db->from('form_responses fr');
         $this->db->join('questionnaires q', 'fr.questionnaire_id = q.id', 'left');
@@ -1399,7 +1421,7 @@ class Questionnaire_model extends CI_Model {
         $this->db->select('
             q.id,
             q.title,
-            CONCAT(\'#\', LPAD(q.id::text, 3, \'0\')) as code,
+            CONCAT(\'#\', LPAD(CAST(q.id AS CHAR), 3, \'0\')) as code,
             COUNT(fr.id) as total_applications,
             MAX(fr.completed_at) as last_application,
             MIN(fr.completed_at) as first_application,
@@ -1408,10 +1430,10 @@ class Questionnaire_model extends CI_Model {
             SUM(CASE WHEN fr.sync_status = \'error\' THEN 1 ELSE 0 END) as error_count,
             SUM(CASE WHEN fr.photo_path IS NOT NULL AND fr.photo_path != \'\' THEN 1 ELSE 0 END) as photos_count,
             SUM(CASE WHEN fr.latitude IS NOT NULL AND fr.longitude IS NOT NULL THEN 1 ELSE 0 END) as locations_count,
-            AVG(CASE 
-                WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL 
-                THEN EXTRACT(EPOCH FROM (fr.completed_at - fr.started_at))/60 
-                ELSE NULL 
+            AVG(CASE
+                WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL
+                THEN TIMESTAMPDIFF(SECOND, fr.started_at, fr.completed_at)/60
+                ELSE NULL
             END) as avg_duration_minutes
         ');
         $this->db->from('questionnaires q');
@@ -1446,7 +1468,7 @@ class Questionnaire_model extends CI_Model {
         $this->db->select('
             fr.*,
             q.title as questionnaire_title,
-            CONCAT(\'#\', LPAD(q.id::text, 3, \'0\')) as questionnaire_code,
+            CONCAT(\'#\', LPAD(CAST(q.id AS CHAR), 3, \'0\')) as questionnaire_code,
             q.description as questionnaire_description,
             u.full_name as applied_by_name
         ');
@@ -1676,10 +1698,10 @@ class Questionnaire_model extends CI_Model {
             q.title,
             q.id,
             COUNT(fr.id) as total_applications,
-            AVG(CASE 
-                WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL 
-                THEN EXTRACT(EPOCH FROM (fr.completed_at - fr.started_at))/60 
-                ELSE NULL 
+            AVG(CASE
+                WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL
+                THEN TIMESTAMPDIFF(SECOND, fr.started_at, fr.completed_at)/60
+                ELSE NULL
             END) as avg_duration_minutes
         ');
         $this->db->from('questionnaires q');

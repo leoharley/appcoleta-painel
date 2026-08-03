@@ -38,7 +38,9 @@ class Responses extends CI_Controller {
         }
 
         $data['responses'] = $this->Response_model->get_filtered($filters);
-        $data['questionnaires'] = $this->Questionnaire_model->get_active();
+        // Traz também os bloqueados/inativos para o gestor consultar os
+        // dados coletados desses questionários.
+        $data['questionnaires'] = $this->Questionnaire_model->get_all_for_panel();
         $data['users'] = $this->User_model->get_assignable_users();
         $data['filters'] = $filters;
         
@@ -87,13 +89,18 @@ class Responses extends CI_Controller {
         if ($this->input->get('date_to')) {
             $filters['date_to'] = $this->input->get('date_to');
         }
+        // BUG FIX: o filtro por pesquisador não era lido — resultado saía com todos
+        // os aplicadores que trabalharam no mesmo período.
+        if ($this->input->get('applied_by')) {
+            $filters['applied_by'] = (int)$this->input->get('applied_by');
+        }
 
         $responses = $this->Response_model->get_for_export($filters);
 
-        // Log para debug
-        log_message('info', 'Export: questionnaire_id=' . $questionnaire_id . ', total_responses=' . count($responses));
+        log_message('info', 'Export: questionnaire_id=' . $questionnaire_id
+            . ', applied_by=' . ($filters['applied_by'] ?? 'all')
+            . ', total_responses=' . count($responses));
 
-        // Gerar arquivo Excel com planilha do questionário
         $this->excel->create_export($responses, 'xlsx', $questionnaire_id);
     }
 
@@ -1032,77 +1039,77 @@ class Responses extends CI_Controller {
     }
 
     public function get_location() {
-        if ($this->input->method() !== 'post') {
-            show_404();
-            return;
-        }
-        
-        $latitude = $this->input->post('latitude');
-        $longitude = $this->input->post('longitude');
-        
-        if (empty($latitude) || empty($longitude) || 
-            !is_numeric($latitude) || !is_numeric($longitude)) {
+        // Aceita tanto POST (legado) quanto GET (novo, permite cache do browser)
+        $latitude  = $this->input->post('latitude')  ?: $this->input->get('lat');
+        $longitude = $this->input->post('longitude') ?: $this->input->get('lng');
+
+        if (empty($latitude) || empty($longitude) ||
+            !is_numeric($latitude) || !is_numeric($longitude) ||
+            $latitude < -90 || $latitude > 90 ||
+            $longitude < -180 || $longitude > 180) {
+            $this->output->set_content_type('text/plain');
             echo 'N/A';
             return;
         }
-        
-        if ($latitude < -90 || $latitude > 90 || $longitude < -180 || $longitude > 180) {
-            echo 'N/A';
-            return;
-        }
-        
+
         try {
             $location_name = $this->get_location_name_api($latitude, $longitude);
+            // Cache do browser por 7 dias — arruinou o "Carregando..." infinito
+            header('Cache-Control: public, max-age=604800');
+            $this->output->set_content_type('text/plain; charset=utf-8');
             echo $location_name;
         } catch (Exception $e) {
             log_message('error', 'Erro na geocodificação: ' . $e->getMessage());
+            $this->output->set_content_type('text/plain');
             echo 'Erro ao carregar';
         }
     }
 
     private function get_location_name_api($latitude, $longitude) {
-        $cache_key = 'location_' . round($latitude, 3) . '_' . round($longitude, 3);
-        
-        if ($this->cache) {
-            $cached_result = $this->cache->get($cache_key);
-            if ($cached_result !== FALSE) {
-                return $cached_result;
-            }
+        // Chave arredondada a 4 decimais (~11 metros) — pontos próximos
+        // compartilham cache, o que aumenta muito a taxa de acerto.
+        $key_lat = round((float)$latitude,  4);
+        $key_lng = round((float)$longitude, 4);
+        $cache_key = 'geo_' . $key_lat . '_' . $key_lng;
+
+        // Cache persistente em disco (application/cache/geocode/*)
+        $file_cache_dir  = APPPATH . 'cache/geocode/';
+        $file_cache_path = $file_cache_dir . md5($cache_key) . '.txt';
+        if (is_file($file_cache_path) && (time() - filemtime($file_cache_path)) < 604800) {
+            $cached = trim((string)@file_get_contents($file_cache_path));
+            if ($cached !== '' && $cached !== 'N/A') return $cached;
         }
-        
+
+        // Chama Nominatim server-side (sem CORS, com User-Agent válido)
         try {
             $url = "https://nominatim.openstreetmap.org/reverse?format=json&lat={$latitude}&lon={$longitude}&zoom=16&addressdetails=1&accept-language=pt-BR,pt,en";
-            
+
             $context = stream_context_create([
                 'http' => [
                     'method' => 'GET',
                     'header' => [
-                        'User-Agent: AppColeta-App/1.0 (contact@sxdata.com)',
+                        'User-Agent: AppColeta/1.0 (institutoalveslima@gmail.com)',
                         'Accept: application/json',
                         'Accept-Language: pt-BR,pt;q=0.9,en;q=0.8'
                     ],
-                    'timeout' => 10
+                    'timeout' => 5
                 ]
             ]);
 
-            $response = file_get_contents($url, false, $context);
-            
-            if ($response === FALSE) {
-                return 'N/A';
-            }
+            $response = @file_get_contents($url, false, $context);
+            if ($response === FALSE) return 'N/A';
 
             $data = json_decode($response, true);
-            
-            if (isset($data['display_name'])) {
-                $formatted_name = $this->format_location_name_api($data);
-                
-                if ($this->cache && $formatted_name !== 'N/A') {
-                    $this->cache->save($cache_key, $formatted_name, 3600);
-                }
-                
-                return $formatted_name;
-            }
+            if (!isset($data['display_name'])) return 'N/A';
 
+            $formatted_name = $this->format_location_name_api($data);
+            if ($formatted_name === 'N/A') return 'N/A';
+
+            // Grava no cache em disco
+            if (!is_dir($file_cache_dir)) @mkdir($file_cache_dir, 0775, true);
+            @file_put_contents($file_cache_path, $formatted_name);
+
+            return $formatted_name;
         } catch (Exception $e) {
             log_message('error', 'Erro na API de geocodificação: ' . $e->getMessage());
         }

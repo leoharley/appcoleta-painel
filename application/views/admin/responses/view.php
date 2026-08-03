@@ -241,6 +241,44 @@ function format_location_name($data)
     </div>
     
     <div class="col-lg-4">
+        <!-- Áudio -->
+        <?php if (!empty($response->audio_path)):
+            // O nome do arquivo pode vir só com o basename (padrão novo) ou
+            // com prefixo antigo tipo "uploads/audios/xxx.m4a". Aceitamos os dois.
+            $audio_basename = basename((string)$response->audio_path);
+            $audio_url = base_url('uploads/audios/' . $audio_basename);
+            $audio_abs = FCPATH . 'uploads/audios/' . $audio_basename;
+            $audio_exists = is_file($audio_abs);
+        ?>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-volume-up me-2"></i>
+                    Áudio da entrevista
+                </h5>
+            </div>
+            <div class="card-body">
+                <?php if ($audio_exists): ?>
+                    <audio controls preload="metadata" style="width:100%">
+                        <source src="<?= $audio_url ?>">
+                        Seu navegador não suporta o player de áudio.
+                    </audio>
+                    <div class="d-grid mt-2">
+                        <a href="<?= $audio_url ?>" download class="btn btn-outline-secondary btn-sm">
+                            <i class="fas fa-download me-1"></i> Baixar arquivo
+                        </a>
+                    </div>
+                <?php else: ?>
+                    <div class="alert alert-warning small mb-0">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                        Arquivo <code><?= htmlspecialchars($audio_basename) ?></code> ainda não foi
+                        sincronizado (ou não está mais disponível).
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <!-- Localização -->
         <?php if ($response->latitude && $response->longitude): ?>
         <div class="card mb-4">

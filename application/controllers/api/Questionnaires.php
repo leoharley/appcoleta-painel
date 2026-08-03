@@ -6,14 +6,10 @@ class Questionnaires extends CI_Controller {
     public function __construct() {
         parent::__construct();
         $this->load->model('Questionnaire_model');
+        $this->load->model('User_model');
+        $this->load->helper('cors');
+        cors_setup();
         header('Content-Type: application/json');
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization');
-        
-        if ($this->input->method() === 'options') {
-            exit();
-        }
     }
 
     public function index() {
@@ -30,11 +26,25 @@ class Questionnaires extends CI_Controller {
         }
 
         try {
-            $questionnaires = $this->Questionnaire_model->get_for_api();
-            
+            // Descobre o papel do usuário do token para decidir se filtra
+            $user = $this->User_model->get_by_id($user_id);
+            if (!$user) {
+                $this->output->set_status_header(401);
+                echo json_encode(['success' => false, 'message' => 'User not found']);
+                return;
+            }
+
+            // Aplicadores só recebem os questionários atribuídos a eles;
+            // supervisores/administradores continuam vendo todos os ativos.
+            if ($user->role === 'aplicador') {
+                $questionnaires = $this->Questionnaire_model->get_for_aplicador($user_id);
+            } else {
+                $questionnaires = $this->Questionnaire_model->get_for_api();
+            }
+
             echo json_encode([
                 'success' => true,
-                'data' => $questionnaires
+                'data'    => $questionnaires
             ]);
         } catch (Exception $e) {
             $this->output->set_status_header(500);

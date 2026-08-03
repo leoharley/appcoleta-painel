@@ -72,11 +72,12 @@
                 </thead>
                 <tbody>
                     <?php foreach ($questionnaires as $questionnaire): ?>
-                    <?php if ($questionnaire->status == 'active'): ?>
-                    <tr data-project="<?= $questionnaire->project_id ?: 'no-project' ?>" 
+                    <tr data-project="<?= $questionnaire->project_id ?: 'no-project' ?>"
                         data-status="<?= $questionnaire->status ?>"
                         data-title="<?= strtolower($questionnaire->title) ?>"
-                        data-description="<?= strtolower($questionnaire->description ?? '') ?>">
+                        data-description="<?= strtolower($questionnaire->description ?? '') ?>"
+                        class="<?= $questionnaire->status !== 'active' ? 'table-secondary' : '' ?>"
+                        style="<?= $questionnaire->status !== 'active' ? 'opacity:0.75;' : '' ?>">
                         <td>
                             <strong><?= $questionnaire->title ?></strong>
                             <?php if ($questionnaire->description): ?>
@@ -178,35 +179,45 @@
                         </td>
                         <td class="text-center">
                             <div class="btn-group" role="group">
-                                <a href="<?= base_url('questionnaires/edit/' . $questionnaire->id) ?>" 
+                                <a href="<?= base_url('questionnaires/edit/' . $questionnaire->id) ?>"
                                    class="btn btn-sm btn-outline-primary" title="Editar">
                                     <i class="fas fa-edit"></i>
                                 </a>
-                                <a href="<?= base_url('questionnaires/duplicate/' . $questionnaire->id) ?>" 
+                                <a href="<?= base_url('questionnaires/duplicate/' . $questionnaire->id) ?>"
                                    class="btn btn-sm btn-outline-secondary" title="Duplicar">
                                     <i class="fas fa-copy"></i>
                                 </a>
-                                <a href="<?= base_url('responses?questionnaire_id=' . $questionnaire->id) ?>" 
+                                <a href="<?= base_url('responses?questionnaire_id=' . $questionnaire->id) ?>"
                                    class="btn btn-sm btn-outline-success" title="Ver Respostas">
                                     <i class="fas fa-chart-bar"></i>
                                 </a>
                                 <?php if ($questionnaire->project_id): ?>
-                                    <a href="<?= base_url('projects/view/' . $questionnaire->project_id) ?>" 
+                                    <a href="<?= base_url('projects/view/' . $questionnaire->project_id) ?>"
                                        class="btn btn-sm btn-outline-info" title="Ver Projeto">
                                         <i class="fas fa-project-diagram"></i>
                                     </a>
                                 <?php endif; ?>
-                                <?php //if ($questionnaire->response_count == 0): ?>
-                                <button type="button" class="btn btn-sm btn-outline-danger" 
+                                <?php if ($questionnaire->status === 'active'): ?>
+                                    <button type="button" class="btn btn-sm btn-outline-warning"
+                                            onclick="toggleQuestionnaireStatus(<?= $questionnaire->id ?>, 'block', '<?= htmlspecialchars(addslashes($questionnaire->title)) ?>')"
+                                            title="Bloquear (some do app, dados são preservados)">
+                                        <i class="fas fa-lock"></i>
+                                    </button>
+                                <?php else: ?>
+                                    <button type="button" class="btn btn-sm btn-warning"
+                                            onclick="toggleQuestionnaireStatus(<?= $questionnaire->id ?>, 'unblock', '<?= htmlspecialchars(addslashes($questionnaire->title)) ?>')"
+                                            title="Desbloquear (volta a aparecer no app)">
+                                        <i class="fas fa-lock-open"></i>
+                                    </button>
+                                <?php endif; ?>
+                                <button type="button" class="btn btn-sm btn-outline-danger"
                                         onclick="deleteQuestionnaire(<?= $questionnaire->id ?>)" title="Excluir">
                                     <i class="fas fa-trash"></i>
                                 </button>
-                                <?php //endif; ?>
                             </div>
                         </td>
                     </tr>
-                    <?php endif; ?>
-                    <?php endforeach; ?>   
+                    <?php endforeach; ?>
                 </tbody>
             </table>
         </div>
@@ -253,6 +264,24 @@
 function deleteQuestionnaire(id) {
     if (confirm('Tem certeza que deseja excluir este questionário? Esta ação não pode ser desfeita.')) {
         window.location.href = '<?= base_url('questionnaires/delete/') ?>' + id;
+    }
+}
+
+// Bloquear (status=inactive) ou desbloquear (status=active) um questionário
+// sem apagar as respostas coletadas.
+function toggleQuestionnaireStatus(id, action, title) {
+    var msg;
+    if (action === 'block') {
+        msg = 'BLOQUEAR o questionário "' + title + '"?\n\n' +
+              'Ele deixará de aparecer no app dos coletores, ' +
+              'mas todas as respostas coletadas continuam disponíveis no painel. ' +
+              'Você pode desbloquear a qualquer momento.';
+    } else {
+        msg = 'DESBLOQUEAR o questionário "' + title + '"?\n\n' +
+              'Ele voltará a ficar disponível no app para os coletores atribuídos.';
+    }
+    if (confirm(msg)) {
+        window.location.href = '<?= base_url('questionnaires/toggle_status/') ?>' + id;
     }
 }
 

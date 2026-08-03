@@ -38,17 +38,20 @@ class Question_model extends CI_Model {
      * @return array Array de perguntas com opções
      */
     public function get_by_questionnaire($questionnaire_id) {
+        // Retorna somente perguntas ativas (soft-delete via is_active=0 mantém
+        // o histórico de respostas mas some do editor e do app do coletor).
         $this->db->select('*');
         $this->db->from('questions');
         $this->db->where('questionnaire_id', $questionnaire_id);
+        $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
         $this->db->order_by('order_index', 'ASC');
         $questions = $this->db->get()->result();
-        
+
         // Para cada pergunta, buscar suas opções
         foreach ($questions as $question) {
             $question->options = $this->get_options($question->id);
         }
-        
+
         return $questions;
     }
 
@@ -64,6 +67,7 @@ class Question_model extends CI_Model {
             $this->db->select('*');
             $this->db->from('questions');
             $this->db->where('questionnaire_id', $questionnaire_id);
+            $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
             $this->db->order_by('order_index', 'ASC');
             
             $questions = $this->db->get()->result();
@@ -259,9 +263,13 @@ class Question_model extends CI_Model {
      * @return array Array de opções
      */
     public function get_options($question_id) {
+        // Só opções ativas — soft-deletadas ficam de fora do editor, da
+        // estratificação e do app do coletor (respostas antigas continuam
+        // legíveis via texto histórico preservado em outros lugares).
         $this->db->select('*');
         $this->db->from('question_options');
         $this->db->where('question_id', $question_id);
+        $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
         $this->db->order_by('order_index', 'ASC');
         return $this->db->get()->result();
     }
@@ -273,12 +281,32 @@ class Question_model extends CI_Model {
      * @return bool Sucesso da operação
      */
     public function delete($question_id) {
-        // Primeiro excluir as opções
+        $question_id = (int)$question_id;
+
+        // Se a pergunta já tem respostas registradas, NÃO podemos apagar
+        // (violaria FK question_responses.question_id → questions.id e ainda
+        // destruiria histórico). Fazemos soft-delete via is_active=0.
+        if ($this->question_has_responses($question_id)) {
+            $this->db->where('id', $question_id);
+            $ok = $this->db->update('questions', array('is_active' => 0));
+            return $ok ? 'soft' : false;
+        }
+
+        // Sem respostas: pode apagar de verdade
         $this->delete_options($question_id);
-        
-        // Depois excluir a pergunta
+
         $this->db->where('id', $question_id);
-        return $this->db->delete('questions');
+        return $this->db->delete('questions') ? 'hard' : false;
+    }
+
+    /**
+     * Verifica se uma pergunta tem alguma resposta em question_responses.
+     */
+    public function question_has_responses($question_id) {
+        $question_id = (int)$question_id;
+        if ($question_id <= 0) return false;
+        return $this->db->where('question_id', $question_id)
+                        ->count_all_results('question_responses') > 0;
     }
 
     /**
@@ -317,13 +345,101 @@ class Question_model extends CI_Model {
 
     /**
      * Excluir todas as opções de uma pergunta
-     * 
+     *
      * @param int $question_id ID da pergunta
      * @return bool Sucesso da operação
      */
     public function delete_options($question_id) {
         $this->db->where('question_id', $question_id);
         return $this->db->delete('question_options');
+    }
+
+    /**
+     * Sincroniza as opções de uma pergunta preservando registros históricos.
+     *
+     * Estratégia (a partir da migration `question_options_soft_delete.sql`):
+     *  - Opções recebidas com `id` existente e mesmo `question_id` → UPDATE.
+     *  - Opções sem `id` (novas) → INSERT.
+     *  - Opções antigas que não vieram na requisição → soft delete (is_active=0),
+     *    a menos que sejam totalmente órfãs (sem histórico), aí DELETE.
+     *
+     * @param int $question_id
+     * @param array $incoming_options Cada item pode ter {id?, text, value, order_index?}
+     * @return bool
+     */
+    public function sync_options($question_id, $incoming_options) {
+        $question_id = (int)$question_id;
+        if ($question_id <= 0) return false;
+
+        // Opções atuais (todas, ativas ou não)
+        $current = $this->db->select('id, option_value')
+            ->where('question_id', $question_id)
+            ->get('question_options')->result();
+        $current_by_id = array();
+        foreach ($current as $c) $current_by_id[(int)$c->id] = $c;
+        $seen_ids = array();
+
+        // Faz UPSERT
+        $order = 0;
+        foreach ((array)$incoming_options as $opt) {
+            $order++;
+            $text  = isset($opt['text']) ? trim((string)$opt['text']) : '';
+            if ($text === '') continue;
+            $value = !empty($opt['value'])
+                ? $opt['value']
+                : strtolower(str_replace(' ', '_', $text));
+            $incoming_id = isset($opt['id']) ? (int)$opt['id'] : 0;
+
+            if ($incoming_id > 0 && isset($current_by_id[$incoming_id])) {
+                $this->db->where('id', $incoming_id)
+                         ->update('question_options', array(
+                            'option_text'  => $text,
+                            'option_value' => $value,
+                            'order_index'  => (int)($opt['order_index'] ?? $order),
+                            'is_active'    => 1,
+                        ));
+                $seen_ids[] = $incoming_id;
+            } else {
+                $this->db->insert('question_options', array(
+                    'question_id'  => $question_id,
+                    'option_text'  => $text,
+                    'option_value' => $value,
+                    'order_index'  => (int)($opt['order_index'] ?? $order),
+                    'is_active'    => 1,
+                    'created_at'   => date('Y-m-d H:i:s'),
+                ));
+                $new_id = (int)$this->db->insert_id();
+                if ($new_id) $seen_ids[] = $new_id;
+            }
+        }
+
+        // Opções que existiam mas não vieram → soft delete se em uso, hard delete se órfãs
+        foreach ($current as $c) {
+            if (in_array((int)$c->id, $seen_ids, true)) continue;
+            if ($this->option_has_responses($question_id, (string)$c->option_value)) {
+                $this->db->where('id', (int)$c->id)->update('question_options', array('is_active' => 0));
+            } else {
+                $this->db->where('id', (int)$c->id)->delete('question_options');
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Verifica se um option_value de uma pergunta aparece em alguma resposta
+     * (via question_responses.selected_options, que guarda JSON).
+     */
+    public function option_has_responses($question_id, $option_value) {
+        if ($option_value === '' || $option_value === null) return false;
+        $q = (int)$question_id;
+        // JSON pode ser array ["v1","v2"] ou string "v1" ou objeto — casamos ambos
+        $this->db->where('question_id', $q);
+        $this->db->group_start()
+                 ->like('selected_options', '"' . $option_value . '"')
+                 ->or_where('selected_options', $option_value)
+                 ->group_end();
+        return $this->db->count_all_results('question_responses') > 0;
     }
 
     /**

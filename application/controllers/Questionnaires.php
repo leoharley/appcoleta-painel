@@ -416,7 +416,13 @@ class Questionnaires extends CI_Controller {
                     'project_id' => $this->input->post('project_id') ?: NULL
                 );
 
-                // Iniciar transação
+                // Iniciar transação. Desligamos db_debug para que erros de
+                // FK (ex.: 1451 ao remover pergunta com respostas) não jogem
+                // uma página de erro crua do MySQL na cara do usuário —
+                // eles retornam FALSE e caem no fluxo de flashdata amigável
+                // abaixo (bloco `if (!empty($db_error))`).
+                $original_db_debug = $this->db->db_debug;
+                $this->db->db_debug = FALSE;
                 $this->db->trans_start();
 
                 // Atualizar dados do questionário
@@ -465,47 +471,65 @@ class Questionnaires extends CI_Controller {
                                 }
                             }
 
-                            // Processar opções para perguntas de múltipla escolha
+                            // Processar opções para perguntas de múltipla escolha —
+                            // usa sync_options (upsert com soft-delete) para não quebrar
+                            // respostas antigas nem cair em erro de FK.
                             if ($question_id && in_array($question['type'], ['radio', 'checkbox', 'select'])) {
-                                // Remover opções existentes
-                                $this->Question_model->delete_options($question_id);
-
-                                // Adicionar novas opções
+                                $incoming = array();
                                 if (isset($question['options']) && is_array($question['options'])) {
                                     foreach ($question['options'] as $opt_index => $option) {
-                                        if (!empty(trim($option['text']))) {
-                                            $option_value = !empty($option['value']) ? 
-                                                        $option['value'] : 
-                                                        strtolower(str_replace(' ', '_', trim($option['text'])));
-
-                                            $option_data = array(
-                                                'question_id' => $question_id,
-                                                'option_text' => trim($option['text']),
-                                                'option_value' => $option_value,
-                                                'order_index' => $opt_index + 1
-                                            );
-
-                                            $this->Question_model->create_option($option_data);
-                                        }
+                                        $incoming[] = array(
+                                            'id'          => isset($option['id']) ? (int)$option['id'] : 0,
+                                            'text'        => $option['text'] ?? '',
+                                            'value'       => $option['value'] ?? '',
+                                            'order_index' => $opt_index + 1,
+                                        );
                                     }
                                 }
+                                $this->Question_model->sync_options($question_id, $incoming);
                             }
                         }
 
-                        // Remover perguntas que foram excluídas
+                        // Remover perguntas que foram excluídas —
+                        // Question_model::delete() decide sozinho se apaga de fato
+                        // (sem respostas) ou faz soft-delete (com respostas).
                         $questions_to_delete = array_diff($existing_question_ids, $processed_question_ids);
+                        $soft_deleted_count = 0;
+                        $hard_deleted_count = 0;
                         foreach ($questions_to_delete as $question_id_to_delete) {
-                            $this->Question_model->delete($question_id_to_delete);
+                            $result = $this->Question_model->delete($question_id_to_delete);
+                            if ($result === 'soft')      $soft_deleted_count++;
+                            elseif ($result === 'hard')  $hard_deleted_count++;
                         }
                     }
 
                     // Finalizar transação
                     $this->db->trans_complete();
+                    $db_error  = $this->db->error();
+                    $trans_ok  = $this->db->trans_status();
+                    // Restaurar db_debug para não afetar o resto da requisição
+                    $this->db->db_debug = $original_db_debug;
 
-                    if ($this->db->trans_status() === FALSE) {
-                        $this->session->set_flashdata('error', 'Erro ao salvar as alterações do questionário.');
+                    if ($trans_ok === FALSE || !empty($db_error['code'])) {
+                        $code = isset($db_error['code']) ? (int)$db_error['code'] : 0;
+                        if ($code === 1451) {
+                            // FK constraint (parent row) — normalmente ao apagar pergunta/opção com respostas
+                            $friendly = 'Não foi possível concluir a alteração porque existem <strong>respostas coletadas</strong> vinculadas a alguma pergunta ou alternativa que você tentou remover. Em vez de excluir, o sistema irá <strong>desativá-las</strong> automaticamente (elas somem do app, mas as respostas anteriores são preservadas). Se o problema persistir, tente novamente ou entre em contato com o suporte.';
+                            $this->session->set_flashdata('error', $friendly);
+                        } elseif ($code) {
+                            log_message('error', 'Questionnaires::edit — DB error ' . $code . ': ' . ($db_error['message'] ?? ''));
+                            $this->session->set_flashdata('error', 'Erro ao salvar as alterações do questionário (código ' . $code . '). Se persistir, informe o suporte com essa referência.');
+                        } else {
+                            $this->session->set_flashdata('error', 'Erro ao salvar as alterações do questionário.');
+                        }
+                        redirect('questionnaires/edit/' . $id);
+                        return;
                     } else {
-                        $this->session->set_flashdata('success', 'Questionário atualizado com sucesso!');
+                        $msg = 'Questionário atualizado com sucesso!';
+                        if (!empty($soft_deleted_count)) {
+                            $msg .= ' Atenção: ' . $soft_deleted_count . ' pergunta(s) que já possuíam respostas coletadas foram <strong>desativadas</strong> (não aparecem mais no app, mas as respostas anteriores foram preservadas para consulta).';
+                        }
+                        $this->session->set_flashdata('success', $msg);
                         
                         if ($questionnaire_data['project_id']) {
                             redirect('projects/view/' . $questionnaire_data['project_id']);
@@ -515,6 +539,7 @@ class Questionnaires extends CI_Controller {
                     }
                 } else {
                     $this->db->trans_rollback();
+                    if (isset($original_db_debug)) $this->db->db_debug = $original_db_debug;
                     $data['error'] = 'Erro ao atualizar questionário.';
                 }
             }
@@ -632,6 +657,7 @@ class Questionnaires extends CI_Controller {
             $this->db->select('*');
             $this->db->from('questions');
             $this->db->where('questionnaire_id', $questionnaire_id);
+            $this->db->where('(is_active IS NULL OR is_active = 1)', null, false);
             $this->db->order_by('order_index', 'ASC');
             
             $questions = $this->db->get()->result();
@@ -1282,6 +1308,37 @@ class Questionnaires extends CI_Controller {
             $this->session->set_flashdata('success', 'Questionário excluído com sucesso!');
         } else {
             $this->session->set_flashdata('error', 'Erro ao excluir questionário.');
+        }
+        redirect('questionnaires');
+    }
+
+    /**
+     * Alterna o status do questionário entre 'active' (disponível no app dos
+     * coletores) e 'inactive' (bloqueado — invisível no app, mas com dados
+     * preservados no painel para consulta e possibilidade de duplicar).
+     */
+    public function toggle_status($id) {
+        $id = (int)$id;
+        $questionnaire = $this->Questionnaire_model->get_by_id($id);
+        if (!$questionnaire) {
+            $this->session->set_flashdata('error', 'Questionário não encontrado.');
+            redirect('questionnaires');
+            return;
+        }
+
+        $new_status = ($questionnaire->status === 'active') ? 'inactive' : 'active';
+        $ok = $this->Questionnaire_model->update($id, array('status' => $new_status));
+
+        if ($ok) {
+            if ($new_status === 'inactive') {
+                $this->session->set_flashdata('success',
+                    'Questionário BLOQUEADO. Ele não aparecerá mais no app dos coletores, mas os dados coletados foram preservados.');
+            } else {
+                $this->session->set_flashdata('success',
+                    'Questionário DESBLOQUEADO. Ele voltou a ficar disponível no app dos coletores.');
+            }
+        } else {
+            $this->session->set_flashdata('error', 'Erro ao alterar o status do questionário.');
         }
         redirect('questionnaires');
     }

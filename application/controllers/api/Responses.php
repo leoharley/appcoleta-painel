@@ -10,11 +10,13 @@ class Responses extends CI_Controller {
         $this->load->model('Question_model');
         $this->load->model('User_model');
         $this->load->library('form_validation');
-        
-        // Verificar autenticação para API
+
+        // CORS + preflight OPTIONS antes da checagem de auth (o browser não
+        // envia Authorization no preflight, então precisamos responder 204).
+        $this->load->helper('cors');
+        cors_setup();
+
         $this->_check_api_auth();
-        
-        // Configurar headers JSON
         $this->output->set_content_type('application/json');
     }
 
@@ -166,11 +168,7 @@ class Responses extends CI_Controller {
             ];
         }
         
-        // Configurar headers CORS se necessário
-        $this->output->set_header('Access-Control-Allow-Origin: *');
-        $this->output->set_header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-        $this->output->set_header('Access-Control-Allow-Headers: Content-Type, Authorization');
-        
+        // CORS já foi setado no construtor via cors_setup(); não precisa repetir.
         $this->output
             ->set_status_header($status_code)
             ->set_output(json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
@@ -182,17 +180,9 @@ class Responses extends CI_Controller {
     }
 
     public function _remap($method, $params = []) {
-        // Lidar com requisições OPTIONS para CORS
-        if ($this->input->method() === 'options') {
-            $this->output
-                ->set_status_header(200)
-                ->set_header('Access-Control-Allow-Origin: *')
-                ->set_header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS')
-                ->set_header('Access-Control-Allow-Headers: Content-Type, Authorization')
-                ->set_output('');
-            return;
-        }
-        
+        // OPTIONS/preflight já foi tratado pelo cors_setup() no construtor
+        // (que faz exit após responder 204). Aqui só cuida do fluxo normal.
+
         // Chamar o método normal
         if (method_exists($this, $method)) {
             return call_user_func_array([$this, $method], $params);

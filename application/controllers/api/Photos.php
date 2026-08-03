@@ -5,13 +5,8 @@ class Photos extends CI_Controller {
 
     public function __construct() {
         parent::__construct();
-        header('Access-Control-Allow-Origin: *');
-        header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Content-Type, Authorization');
-        
-        if ($this->input->method() === 'options') {
-            exit();
-        }
+        $this->load->helper('cors');
+        cors_setup();
     }
 
     public function upload() {

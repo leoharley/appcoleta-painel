@@ -536,6 +536,11 @@ function is_checkbox_checked($value) {
                                         <?php if (!empty($question->options)): ?>
                                             <?php foreach ($question->options as $opt_index => $option): ?>
                                             <div class="input-group mb-2">
+                                                <!-- id da opção: preserva a linha existente em sync_options()
+                                                     e evita que cada save duplique as alternativas. -->
+                                                <input type="hidden"
+                                                       name="questions[<?= $index ?>][options][<?= $opt_index ?>][id]"
+                                                       value="<?= (int)$option->id ?>">
                                                 <input type="text" class="form-control"
                                                        name="questions[<?= $index ?>][options][<?= $opt_index ?>][text]"
                                                        value="<?= $option->option_text ?>" placeholder="Texto da opção" required

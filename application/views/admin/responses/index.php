@@ -550,187 +550,154 @@ function get_location_name_cached($latitude, $longitude)
 </style>
 
 <script>
-// Função para buscar localização via PHP (backend) - mantém o código original
-async function fetchLocationName(latitude, longitude) {
+// ==========================================================================
+// Geocoding rápido para a coluna "Localização" com:
+//   - Cache no localStorage (persiste entre navegações da mesma sessão)
+//   - Requisições em PARALELO ao endpoint do backend (que já tem cache em
+//     disco de 7 dias). Antes ia direto no Nominatim → rate-limit → travava.
+//   - Timeout curto (6s) — se não voltar, mostra as coordenadas em vez
+//     de deixar "Carregando..." eterno.
+//   - Cache-key arredondado (~11 m) → coletas próximas usam o mesmo resultado.
+// ==========================================================================
+
+const GEO_BASE_URL   = '<?= base_url("responses/get_location") ?>';
+const GEO_CACHE_KEY  = 'geo_cache_v2';       // versão pra invalidar caches antigos
+const GEO_TIMEOUT_MS = 6000;
+const GEO_CONCURRENCY = 4;                    // requisições simultâneas
+const GEO_ROUND_DECIMALS = 4;                 // ~11 metros
+
+const _geoMem = new Map();   // cache in-memory (dentro da mesma página)
+let _geoStore = {};
+try {
+    _geoStore = JSON.parse(localStorage.getItem(GEO_CACHE_KEY) || '{}');
+} catch (e) { _geoStore = {}; }
+
+function geoKey(lat, lng) {
+    return lat.toFixed(GEO_ROUND_DECIMALS) + ',' + lng.toFixed(GEO_ROUND_DECIMALS);
+}
+
+function geoGetCached(lat, lng) {
+    const k = geoKey(lat, lng);
+    if (_geoMem.has(k)) return _geoMem.get(k);
+    if (_geoStore[k])   return _geoStore[k];
+    return null;
+}
+
+function geoSetCached(lat, lng, name) {
+    if (!name || name === 'N/A' || name === 'Erro ao carregar') return;
+    const k = geoKey(lat, lng);
+    _geoMem.set(k, name);
+    _geoStore[k] = name;
+    // Persiste ocasionalmente (não a cada request, pra não gastar main thread)
+    try { localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(_geoStore)); } catch (e) {}
+}
+
+async function fetchLocationName(lat, lng) {
+    // 1) Cache local antes de tudo
+    const cached = geoGetCached(lat, lng);
+    if (cached) return cached;
+
+    // 2) Backend com timeout
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), GEO_TIMEOUT_MS);
     try {
-        // Criar URL para chamar uma função PHP via AJAX
-        const formData = new FormData();
-        formData.append('latitude', latitude);
-        formData.append('longitude', longitude);
-        formData.append('action', 'get_location');
-        
-        const response = await fetch('<?= base_url("responses/get_location") ?>', {
-            method: 'POST',
-            body: formData
-        });
-        
-        if (!response.ok) {
-            throw new Error('Erro na requisição');
-        }
-        
-        const result = await response.text();
-        return result && result !== 'N/A' ? result : 'Localização não encontrada';
-        
-    } catch (error) {
-        console.error('Erro ao buscar localização:', error);
-        return 'Erro ao carregar';
+        const url = GEO_BASE_URL + '?lat=' + encodeURIComponent(lat) + '&lng=' + encodeURIComponent(lng);
+        const resp = await fetch(url, { method: 'GET', signal: ctrl.signal, credentials: 'same-origin' });
+        clearTimeout(to);
+        if (!resp.ok) return null;
+        const text = (await resp.text()).trim();
+        if (!text || text === 'N/A' || text === 'Erro ao carregar') return null;
+        geoSetCached(lat, lng, text);
+        return text;
+    } catch (e) {
+        clearTimeout(to);
+        return null; // timeout ou erro — cai no fallback (coordenadas)
     }
 }
 
-// Função alternativa usando Nominatim diretamente (fallback) - mantém o código original
-async function fetchLocationNameDirect(latitude, longitude) {
-    try {
-        // Usar JSONP ou proxy para contornar CORS
-        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=16&addressdetails=1`;
-        
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json'
-            }
-        });
-        
-        if (!response.ok) {
-            throw new Error('Erro na API');
-        }
-        
-        const data = await response.json();
-        
-        if (data && data.display_name) {
-            return formatLocationName(data);
-        }
-        
-        return 'N/A';
-    } catch (error) {
-        console.error('Erro ao buscar localização diretamente:', error);
-        return 'Erro ao carregar';
-    }
-}
-
-// Mantém todas as outras funções originais...
-function formatLocationName(data) {
-    if (!data || !data.address) {
-        return data && data.display_name ? data.display_name.substring(0, 60) : 'N/A';
-    }
-
-    const address = data.address;
-    const locationParts = [];
-
-    // Priorizar informações mais relevantes
-    if (address.road) locationParts.push(address.road);
-    if (address.suburb || address.neighbourhood) {
-        locationParts.push(address.suburb || address.neighbourhood);
-    }
-    if (address.city || address.town || address.village) {
-        locationParts.push(address.city || address.town || address.village);
-    }
-    if (address.state) locationParts.push(address.state);
-
-    let result = locationParts.length > 0 ? locationParts.join(', ') : data.display_name;
-    
-    // Limitar tamanho para não quebrar layout
-    if (result && result.length > 50) {
-        result = result.substring(0, 47) + '...';
-    }
-    
-    return result || 'N/A';
-}
-
-// Função para carregar uma localização individual
-async function loadSingleLocation(element, index, total) {
-    const lat = parseFloat(element.getAttribute('data-lat'));
-    const lng = parseFloat(element.getAttribute('data-lng'));
-    
-    // Validar coordenadas
-    if (!lat || !lng || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-        updateLocationUI(element, 'Coordenadas inválidas');
-        return;
-    }
-    
-    try {
-        let locationName = 'N/A';
-        
-        // Tentar buscar localização
-        try {
-            locationName = await fetchLocationNameDirect(lat, lng);
-        } catch (error) {
-            console.warn('Falha na busca direta, tentando método alternativo...');
-            locationName = 'Localização não disponível';
-        }
-        
-        // Atualizar interface
-        updateLocationUI(element, locationName);
-        
-        // Atualizar progresso
-        updateProgress(index + 1, total);
-        
-    } catch (error) {
-        console.error('Erro ao processar localização:', error);
-        updateLocationUI(element, 'Erro ao carregar');
-        updateProgress(index + 1, total);
-    }
-}
-
-// Função para atualizar a UI de uma localização
 function updateLocationUI(element, locationName) {
     const loadingDiv = element.querySelector('.location-loading');
     const contentDiv = element.querySelector('.location-content');
-    const nameSpan = element.querySelector('.location-name');
-    
+    const nameSpan   = element.querySelector('.location-name');
+
     if (loadingDiv) loadingDiv.style.display = 'none';
     if (contentDiv) contentDiv.style.display = 'block';
-    if (nameSpan) nameSpan.textContent = locationName || 'N/A';
+    if (nameSpan)   nameSpan.textContent = locationName || '—';
 }
 
-// Função para atualizar o progresso
 function updateProgress(current, total) {
     const progressSpan = document.getElementById('loading-progress');
-    const totalSpan = document.getElementById('total-locations');
-    
+    const totalSpan    = document.getElementById('total-locations');
     if (progressSpan) progressSpan.textContent = current;
-    if (totalSpan) totalSpan.textContent = total;
-    
-    // Se terminou, esconder loading
+    if (totalSpan)    totalSpan.textContent = total;
     if (current >= total) {
         setTimeout(() => {
-            const globalLoading = document.getElementById('geocoding-global-loading');
-            if (globalLoading) globalLoading.style.display = 'none';
-        }, 1000);
+            const g = document.getElementById('geocoding-global-loading');
+            if (g) g.style.display = 'none';
+        }, 500);
     }
 }
 
-// Função principal para carregar todas as localizações
-async function loadAllLocations() {
-    const locationElements = document.querySelectorAll('.location-info[data-lat][data-lng]');
-    const totalLocations = locationElements.length;
-    
-    console.log(`Encontrados ${totalLocations} elementos com coordenadas`);
-    
-    if (totalLocations === 0) {
-        console.log('Nenhuma localização para processar');
+async function loadSingleLocation(element, done, total) {
+    const lat = parseFloat(element.getAttribute('data-lat'));
+    const lng = parseFloat(element.getAttribute('data-lng'));
+
+    if (!isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        updateLocationUI(element, 'Coordenadas inválidas');
+        updateProgress(done, total);
         return;
     }
-    
-    // Mostrar loading global
-    const globalLoading = document.getElementById('geocoding-global-loading');
-    if (globalLoading) {
-        globalLoading.style.display = 'block';
-        updateProgress(0, totalLocations);
+
+    let name = await fetchLocationName(lat, lng);
+    if (!name) {
+        // Fallback: mostrar as próprias coordenadas em vez de "Carregando..." infinito
+        name = lat.toFixed(5) + ', ' + lng.toFixed(5);
     }
-    
-    // Processar cada localização com delay
-    for (let i = 0; i < locationElements.length; i++) {
-        console.log(`Processando localização ${i + 1}/${totalLocations}`);
-        
-        await loadSingleLocation(locationElements[i], i, totalLocations);
-        
-        // Delay entre requisições (reduzido para 500ms)
-        if (i < locationElements.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
+    updateLocationUI(element, name);
+    updateProgress(done, total);
+}
+
+// Fila com concorrência limitada — muitos elementos ao mesmo tempo, mas
+// no máximo GEO_CONCURRENCY requests HTTP em voo.
+async function loadAllLocations() {
+    const els = Array.from(document.querySelectorAll('.location-info[data-lat][data-lng]'));
+    const total = els.length;
+    if (total === 0) return;
+
+    // Marca imediatamente as que já estão em cache (sem esperar nada)
+    let doneCount = 0;
+    const pending = [];
+    for (const el of els) {
+        const lat = parseFloat(el.getAttribute('data-lat'));
+        const lng = parseFloat(el.getAttribute('data-lng'));
+        const cached = (isFinite(lat) && isFinite(lng)) ? geoGetCached(lat, lng) : null;
+        if (cached) {
+            updateLocationUI(el, cached);
+            doneCount++;
+        } else {
+            pending.push(el);
         }
     }
-    
-    console.log('Todas as localizações foram processadas');
+    updateProgress(doneCount, total);
+
+    if (pending.length === 0) return;
+
+    const globalLoading = document.getElementById('geocoding-global-loading');
+    if (globalLoading) globalLoading.style.display = 'block';
+
+    // Worker pool
+    let cursor = 0;
+    async function worker() {
+        while (cursor < pending.length) {
+            const idx = cursor++;
+            await loadSingleLocation(pending[idx], ++doneCount, total);
+        }
+    }
+    const workers = [];
+    for (let i = 0; i < Math.min(GEO_CONCURRENCY, pending.length); i++) {
+        workers.push(worker());
+    }
+    await Promise.all(workers);
 }
 
 function showPhoto(photoUrl) {
@@ -789,27 +756,24 @@ function validateExportForm() {
 // Inicializar quando DOM estiver pronto
 document.addEventListener('DOMContentLoaded', function() {
     console.log('DOM carregado, iniciando carregamento de localizações...');
-    
-    // Aguardar um pouco para garantir que tudo carregou
+
+    // Delay curto para o DataTables terminar a inicialização
     setTimeout(() => {
-        loadAllLocations().catch(error => {
-            console.error('Erro no carregamento das localizações:', error);
-            
-            // Esconder loading em caso de erro
-            const globalLoading = document.getElementById('geocoding-global-loading');
-            if (globalLoading) {
-                globalLoading.innerHTML = `
-                    <div class="alert alert-warning">
-                        <i class="fas fa-exclamation-triangle me-2"></i>
-                        Não foi possível carregar algumas localizações. Verifique sua conexão.
-                    </div>
-                `;
-                setTimeout(() => {
-                    globalLoading.style.display = 'none';
-                }, 3000);
-            }
+        loadAllLocations().catch(err => console.error('geo:', err));
+    }, 300);
+
+    // Reprocessar sempre que o DataTables redesenhar a tabela
+    // (paginação, ordenação, busca) — cache local torna isso instantâneo
+    // para itens já resolvidos, e só as novas rows visíveis fazem fetch.
+    if (window.jQuery && jQuery.fn.DataTable) {
+        jQuery(document).on('draw.dt', '.data-table', function() {
+            // Pequeno debounce para não repetir em drawings encadeados
+            clearTimeout(window.__geoDrawDebounce);
+            window.__geoDrawDebounce = setTimeout(() => {
+                loadAllLocations().catch(err => console.error('geo(draw):', err));
+            }, 100);
         });
-    }, 1000);
+    }
     
     // NOVO: Adicionar validação ao formulário de exportação
     const exportForm = document.getElementById('exportRawDataForm');

@@ -5,6 +5,8 @@ class System extends CI_Controller {
 
     public function __construct() {
         parent::__construct();
+        $this->load->helper('cors');
+        cors_setup();
         $this->output->set_content_type('application/json');
     }
 

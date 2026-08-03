@@ -23,8 +23,9 @@ class Response_model extends CI_Model {
         $this->db->join('questionnaires q', 'fr.questionnaire_id = q.id', 'left');
         $this->db->join('users u', 'fr.applied_by = u.id', 'left');
 
-        // Filtrar apenas questionários ativos
-        $this->db->where('q.status', 'active');
+        // Antes filtrava só q.status='active', o que escondia respostas de
+        // questionários BLOQUEADOS (status='inactive'). Removido para que o
+        // gestor continue enxergando os dados coletados mesmo após bloquear.
 
         if (isset($filters['questionnaire_id']) && $filters['questionnaire_id']) {
             $this->db->where('fr.questionnaire_id', $filters['questionnaire_id']);
@@ -270,23 +271,23 @@ class Response_model extends CI_Model {
                 q.description as questionnaire_description,
                 u.full_name as applied_by_name,
                 u.username as applied_by_username,
-                CASE 
-                    WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL 
-                    THEN EXTRACT(EPOCH FROM (fr.completed_at - fr.started_at))/60 
-                    ELSE NULL 
+                CASE
+                    WHEN fr.started_at IS NOT NULL AND fr.completed_at IS NOT NULL
+                    THEN TIMESTAMPDIFF(SECOND, fr.started_at, fr.completed_at)/60
+                    ELSE NULL
                 END as duration_minutes,
                 (
                     SELECT CASE
-                        WHEN qr.response_text IS NOT NULL AND qr.response_text != '' 
+                        WHEN qr.response_text IS NOT NULL AND qr.response_text != ''
                             THEN qr.response_text
-                        WHEN qr.response_number IS NOT NULL 
-                            THEN qr.response_number::text
-                        WHEN qr.response_date IS NOT NULL 
-                            THEN TO_CHAR(qr.response_date, 'DD/MM/YYYY')
-                        WHEN qr.response_datetime IS NOT NULL 
-                            THEN TO_CHAR(qr.response_datetime, 'DD/MM/YYYY HH24:MI')
-                        WHEN qr.selected_options IS NOT NULL 
-                            THEN qr.selected_options::text
+                        WHEN qr.response_number IS NOT NULL
+                            THEN CAST(qr.response_number AS CHAR)
+                        WHEN qr.response_date IS NOT NULL
+                            THEN DATE_FORMAT(qr.response_date, '%d/%m/%Y')
+                        WHEN qr.response_datetime IS NOT NULL
+                            THEN DATE_FORMAT(qr.response_datetime, '%d/%m/%Y %H:%i')
+                        WHEN qr.selected_options IS NOT NULL
+                            THEN CAST(qr.selected_options AS CHAR)
                         ELSE NULL
                     END
                     FROM question_responses qr
@@ -654,17 +655,18 @@ class Response_model extends CI_Model {
     }
 
     public function get_detailed_analysis($filters = array()) {
-        // Em vez de retornar um array simples, vamos retornar dados por questionário
+        // BUG FIX: EXTRACT(EPOCH FROM ...) é sintaxe PostgreSQL — o banco é
+        // MySQL, precisa usar TIMESTAMPDIFF(SECOND, a, b)/60 para minutos.
         $this->db->select("
             q.id as questionnaire_id,
             q.title as questionnaire_title,
             COUNT(fr.id) as total_responses,
             COUNT(CASE WHEN fr.photo_path IS NOT NULL AND fr.photo_path != '' THEN 1 END) as photos_count,
             COUNT(CASE WHEN fr.latitude IS NOT NULL AND fr.longitude IS NOT NULL THEN 1 END) as locations_count,
-            AVG(CASE WHEN fr.completed_at IS NOT NULL AND fr.started_at IS NOT NULL 
-                THEN EXTRACT(EPOCH FROM (fr.completed_at - fr.started_at))/60 END) as avg_time,
+            AVG(CASE WHEN fr.completed_at IS NOT NULL AND fr.started_at IS NOT NULL
+                THEN TIMESTAMPDIFF(SECOND, fr.started_at, fr.completed_at)/60 END) as avg_time,
             COUNT(CASE WHEN fr.completed_at IS NOT NULL THEN 1 END) as completed_responses
-        ");
+        ", false);
         $this->db->from('questionnaires q');
         $this->db->join('form_responses fr', 'q.id = fr.questionnaire_id', 'left');
         $this->db->join('users u', 'fr.applied_by = u.id', 'left');
@@ -768,6 +770,12 @@ class Response_model extends CI_Model {
         // Aplicar filtros
         if (!empty($filters['questionnaire_id'])) {
             $this->db->where('fr.questionnaire_id', $filters['questionnaire_id']);
+        }
+
+        // BUG FIX: filtro por pesquisador antes era ignorado — a exportação
+        // saía com todos os aplicadores que atuaram no mesmo período.
+        if (!empty($filters['applied_by'])) {
+            $this->db->where('fr.applied_by', (int)$filters['applied_by']);
         }
 
         if (!empty($filters['date_from'])) {
@@ -1015,7 +1023,7 @@ class Response_model extends CI_Model {
      */
     public function get_coverage_stats($filters = array()) {
         // Número total de pontos únicos de coleta
-        $this->db->select("COUNT(DISTINCT CONCAT(latitude::text, ',', longitude::text)) as unique_points");
+        $this->db->select("COUNT(DISTINCT CONCAT(CAST(latitude AS CHAR), ',', CAST(longitude AS CHAR))) as unique_points", false);
         $this->db->from('form_responses');
         $this->db->where('latitude IS NOT NULL');
         $this->db->where('longitude IS NOT NULL');
@@ -1410,11 +1418,11 @@ public function get_questionnaire_summary($questionnaire_id, $filters = array())
     $unique_result = $this->db->get()->row();
     $unique_respondents = $unique_result ? $unique_result->unique_respondents : 0;
     
-    // Tempo médio de conclusão (compatível com PostgreSQL)
-    $sql = "SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at))/60) as avg_time
-            FROM form_responses 
-            WHERE questionnaire_id = ? 
-            AND completed_at IS NOT NULL 
+    // Tempo médio de conclusão em minutos (MySQL — EXTRACT(EPOCH) é PostgreSQL)
+    $sql = "SELECT AVG(TIMESTAMPDIFF(SECOND, started_at, completed_at)/60) as avg_time
+            FROM form_responses
+            WHERE questionnaire_id = ?
+            AND completed_at IS NOT NULL
             AND started_at IS NOT NULL";
     
     $params = array($questionnaire_id);
@@ -2552,7 +2560,7 @@ public function get_coverage_statistics($filters = array()) {
     // Query simplificada sem CTEs complexas para melhor compatibilidade
     $sql = "
         SELECT 
-            COUNT(DISTINCT CONCAT(fr.latitude::text, ',', fr.longitude::text)) as total_unique_points,
+            COUNT(DISTINCT CONCAT(CAST(fr.latitude AS CHAR), ',', CAST(fr.longitude AS CHAR))) as total_unique_points,
             COUNT(DISTINCT CASE WHEN fr.location_name IS NOT NULL AND fr.location_name != '' 
                                THEN fr.location_name END) as unique_named_locations,
             COUNT(*) as total_responses,
