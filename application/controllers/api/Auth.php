@@ -4,6 +4,18 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 
 class Auth extends CI_Controller {
 
+    /**
+     * Validade do token em segundos (28 dias).
+     *
+     * O app de coleta funciona muito offline e só sincroniza esporadicamente,
+     * por isso um TTL curto (era 24h) fazia com que o aplicador só descobrisse
+     * que a sessão expirou quando ia subir uma coleta — perdendo o dia se a
+     * conexão só aparecesse no fim do expediente. 28 dias + renovação
+     * deslizante em /auth/verify garantem que quem abre o app pelo menos
+     * uma vez ao mês nunca é expulso.
+     */
+    const TOKEN_TTL_SECONDS = 28 * 24 * 60 * 60;
+
     public function __construct() {
         parent::__construct();
         $this->load->model('User_model');
@@ -79,19 +91,26 @@ class Auth extends CI_Controller {
         }
 
         $user_id = $this->verify_token($token);
-        
+
         if ($user_id) {
             $user = $this->User_model->get_by_id($user_id);
-            
+
             if ($user && $user->is_active) {
+                // Renovação deslizante: emite um NOVO token com prazo cheio
+                // (28 dias a partir de agora) para o app substituir o atual.
+                // O token antigo continua válido até o vencimento original,
+                // mas o app grava o novo por cima e ganha mais um mês.
+                $renewed_token = $this->generate_token($user->id);
+
                 echo json_encode([
                     'success' => true,
-                    'user' => [
-                        'id' => $user->id,
-                        'username' => $user->username,
-                        'email' => $user->email,
+                    'token'   => $renewed_token,
+                    'user'    => [
+                        'id'        => $user->id,
+                        'username'  => $user->username,
+                        'email'     => $user->email,
                         'full_name' => $user->full_name,
-                        'role' => $user->role,
+                        'role'      => $user->role,
                         'is_active' => $user->is_active
                     ]
                 ]);
@@ -106,12 +125,13 @@ class Auth extends CI_Controller {
     }
 
     private function generate_token($user_id) {
+        $now = time();
         $payload = [
-            'user_id' => $user_id,
-            'issued_at' => time(),
-            'expires_at' => time() + (24 * 60 * 60) // 24 horas
+            'user_id'    => $user_id,
+            'issued_at'  => $now,
+            'expires_at' => $now + self::TOKEN_TTL_SECONDS
         ];
-        
+
         return base64_encode(json_encode($payload));
     }
 
