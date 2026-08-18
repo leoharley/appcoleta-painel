@@ -53,7 +53,7 @@
  *
  * NOTE: If you change these, also change the error_reporting() code below
  */
-	define('ENVIRONMENT', isset($_SERVER['CI_ENV']) ? $_SERVER['CI_ENV'] : 'development');
+	define('ENVIRONMENT', isset($_SERVER['CI_ENV']) ? $_SERVER['CI_ENV'] : 'production');
 
 /*
  *---------------------------------------------------------------
@@ -66,13 +66,19 @@
 switch (ENVIRONMENT)
 {
 	case 'development':
-		error_reporting(-1);
+		// NAO usar error_reporting(-1) neste projeto: o CodeIgniter 3 gera
+		// centenas de avisos E_DEPRECATED no PHP 8.2+ ('Creation of dynamic
+		// property...'). Impressos na tela, eles enviam output antes dos
+		// headers e quebram a sessao e os redirects do painel.
+		error_reporting(E_ALL & ~E_DEPRECATED & ~E_STRICT & ~E_USER_DEPRECATED);
 		ini_set('display_errors', 1);
+		ini_set('log_errors', 1);
 	break;
 
 	case 'testing':
 	case 'production':
 		ini_set('display_errors', 0);
+		ini_set('log_errors', 1);
 		if (version_compare(PHP_VERSION, '5.3', '>='))
 		{
 			error_reporting(E_ALL & ~E_NOTICE & ~E_DEPRECATED & ~E_STRICT & ~E_USER_NOTICE & ~E_USER_DEPRECATED);
