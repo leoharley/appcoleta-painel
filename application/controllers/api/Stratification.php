@@ -106,7 +106,9 @@ class Stratification extends CI_Controller {
                     'category_id'     => (int)$cat->id,
                     'category_name'   => $cat->category_name,
                     'dimension_type'  => $cat->dimension_type,
-                    'question_id'     => $cat->question_id !== null ? (int)$cat->question_id : null,
+                    // Sempre int: o app faz cast nao-nulo. Dimensoes
+                    // 'applicator'/'weekday' usam o sentinel 0.
+                    'question_id'     => (int)$cat->question_id,
                     'total_target'    => (int)$cat->total_target,
                     'total_current'   => (int)$cat->total_current,
                     'percentage'      => (float)$cat->percentage,

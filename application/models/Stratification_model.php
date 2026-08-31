@@ -125,9 +125,13 @@ class Stratification_model extends CI_Model {
             $cat_data = array(
                 'stratification_id' => $stratification_id,
                 'dimension_type' => $dimension_type,
+                // question_id e NOT NULL DEFAULT 0 no banco (ver
+                // database/patch_stratification_categories_question_id.sql).
+                // Dimensoes 'applicator'/'weekday' nao usam pergunta: gravam o
+                // sentinel 0 em vez de NULL, que violaria a constraint.
                 'question_id' => ($dimension_type === 'question' && !empty($cat['question_id']))
                     ? (int)$cat['question_id']
-                    : null,
+                    : 0,
                 'category_name' => $cat['category_name'],
                 'display_order' => $order,
                 'created_at' => date('Y-m-d H:i:s')
