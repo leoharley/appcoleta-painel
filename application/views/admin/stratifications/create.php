@@ -172,6 +172,7 @@
 
 <script>
 var existingData = <?= json_encode($stratification ? $stratification->categories : []) ?>;
+var allApplicators = [];
 
 function escapeHtml(text) {
     var div = document.createElement('div');
@@ -234,21 +235,96 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
+    // Grade por aplicador: liga/desliga as colunas
+    $(document).on('change', '.per-applicator-toggle', function() {
+        var card = $(this).closest('.question-card');
+        card.find('.per-app-col').toggle($(this).prop('checked'));
+        refreshGrid(card);
+    });
+
+    // Recalcula somas e avisos ao digitar qualquer cota
+    $(document).on('input', '.app-quota-input, .quota-input', function() {
+        refreshGrid($(this).closest('.question-card'));
+    });
+
     <?php if ($mode === 'edit' && $stratification): ?>
         loadDimensions(<?= $stratification->questionnaire_id ?>);
     <?php endif; ?>
 });
 
+/**
+ * Atualiza somas por aplicador e avisa quando a soma das cotas
+ * individuais nao bate com a meta geral da opcao.
+ */
+function refreshGrid(card) {
+    if (!card || !card.length) return;
+    var on = card.find('.per-applicator-toggle').prop('checked');
+    var warn = card.find('.grid-warning');
+
+    // Soma por coluna (total de cada aplicador na pergunta)
+    card.find('.app-col-sum').each(function() {
+        var uid = $(this).data('user-id');
+        var sum = 0;
+        card.find('.app-quota-input[data-user-id="' + uid + '"]').each(function() {
+            sum += parseInt($(this).val()) || 0;
+        });
+        $(this).text(sum);
+    });
+
+    if (!on) { warn.hide(); return; }
+
+    // Confere linha a linha: soma dos aplicadores vs meta geral
+    var problemas = [];
+    card.find('.quota-input').each(function() {
+        var geral = parseInt($(this).val()) || 0;
+        if (geral <= 0) return;
+        var optValue = $(this).data('option-value');
+        var label = $(this).data('option-label');
+        var soma = 0;
+        card.find('.app-quota-input').each(function() {
+            if ($(this).data('option-value') === optValue) soma += parseInt($(this).val()) || 0;
+        });
+        if (soma !== geral) {
+            problemas.push(label + ': aplicadores somam ' + soma + ', meta geral é ' + geral);
+        }
+    });
+
+    if (problemas.length) {
+        warn.html('<i class="fas fa-exclamation-triangle me-1"></i>' +
+                  problemas.join('<br>') +
+                  '<br><span class="text-muted">A estratificação será salva assim mesmo — ajuste se não for intencional.</span>').show();
+    } else {
+        warn.hide();
+    }
+}
+
 function collectStrata(card) {
     var out = [];
+    var perApp = card.find('.per-applicator-toggle').prop('checked');
+
     card.find('.quota-input').each(function() {
         var quota = parseInt($(this).val()) || 0;
         if (quota <= 0) return;
-        out.push({
-            option_value: $(this).data('option-value'),
+
+        var optValue = $(this).data('option-value');
+        var stratum = {
+            option_value: optValue,
             option_label: $(this).data('option-label'),
             target_quota: quota
-        });
+        };
+
+        // Cotas individuais so acompanham quando a grade esta ativa.
+        if (perApp) {
+            var quotas = {};
+            card.find('.app-quota-input').each(function() {
+                if ($(this).data('option-value') !== optValue) return;
+                var q = parseInt($(this).val()) || 0;
+                if (q > 0) quotas[$(this).data('user-id')] = q;
+            });
+            if (Object.keys(quotas).length) stratum.applicator_quotas = quotas;
+        }
+
+        out.push(stratum);
     });
     return out;
 }
@@ -265,6 +341,12 @@ function writeCategory(idx, dimensionType, categoryName, strata, questionId) {
         addHidden(sp + '[option_value]', s.option_value);
         addHidden(sp + '[option_label]', s.option_label);
         addHidden(sp + '[target_quota]', s.target_quota);
+
+        if (s.applicator_quotas) {
+            Object.keys(s.applicator_quotas).forEach(function(uid) {
+                addHidden(sp + '[applicator_quotas][' + uid + ']', s.applicator_quotas[uid]);
+            });
+        }
     });
 }
 
@@ -283,6 +365,7 @@ function loadDimensions(questionnaireId) {
                 $('#dimensionsEmpty').html('<p class="text-danger">Erro ao carregar dimensões.</p>').show();
                 return;
             }
+            allApplicators = response.applicators || [];
             renderQuestions(response.questions || []);
             renderApplicators(response.applicators || []);
             renderWeekdays(response.weekdays || []);
@@ -309,6 +392,23 @@ function getExistingByDimension(dimensionType, questionId) {
         }
     }
     return null;
+}
+
+/**
+ * Mapa "option_value|user_id" -> cota individual, a partir dos dados salvos.
+ */
+function buildApplicatorQuotaMap(category) {
+    var m = {};
+    if (category && category.strata) {
+        category.strata.forEach(function(s) {
+            var q = s.applicator_quotas;
+            if (!q) return;
+            Object.keys(q).forEach(function(uid) {
+                m[s.option_value + '|' + uid] = parseInt(q[uid]) || 0;
+            });
+        });
+    }
+    return m;
 }
 
 function buildStrataMap(category) {
@@ -353,20 +453,76 @@ function renderQuestions(questions) {
         html += '<label class="form-label fw-bold">Nome da Categoria</label>';
         html += '<input type="text" class="form-control category-name" value="' + escapeHtml(categoryName) + '">';
         html += '</div>';
-        html += '<label class="form-label fw-bold">Opções e Metas</label>';
-        html += '<div class="table-responsive"><table class="table table-sm mb-0">';
-        html += '<thead><tr><th>Opção</th><th>Valor</th><th style="width:120px">Meta (Cota)</th></tr></thead><tbody>';
+        var perAppMap = buildApplicatorQuotaMap(existing);
+        var hasGrid = allApplicators.length > 0;
+
+        html += '<div class="d-flex justify-content-between align-items-center mb-2">';
+        html += '<label class="form-label fw-bold mb-0">Opções e Metas</label>';
+        if (hasGrid) {
+            html += '<div class="form-check form-switch">';
+            html += '<input class="form-check-input per-applicator-toggle" type="checkbox" ' +
+                    (Object.keys(perAppMap).length ? 'checked' : '') + '>';
+            html += '<label class="form-check-label small">Definir meta por aplicador</label>';
+            html += '</div>';
+        }
+        html += '</div>';
+
+        html += '<div class="table-responsive"><table class="table table-sm mb-0 align-middle">';
+        html += '<thead><tr><th>Opção</th><th>Valor</th><th style="width:120px">Meta Geral</th>';
+        if (hasGrid) {
+            allApplicators.forEach(function(u) {
+                html += '<th class="per-app-col text-center small" style="width:110px">' +
+                        escapeHtml(u.full_name) + '</th>';
+            });
+        }
+        html += '</tr></thead><tbody>';
+
         q.options.forEach(function(opt) {
             var quota = strataMap.hasOwnProperty(opt.option_value) ? strataMap[opt.option_value] : '';
             html += '<tr><td>' + escapeHtml(opt.option_text) + '</td>';
             html += '<td><code>' + escapeHtml(opt.option_value) + '</code></td>';
             html += '<td><input type="number" class="form-control form-control-sm quota-input" min="0" value="' + quota + '"';
             html += ' data-option-value="' + escapeHtml(opt.option_value) + '"';
-            html += ' data-option-label="' + escapeHtml(opt.option_text) + '" placeholder="0"></td></tr>';
+            html += ' data-option-label="' + escapeHtml(opt.option_text) + '" placeholder="0"></td>';
+
+            if (hasGrid) {
+                allApplicators.forEach(function(u) {
+                    var k = opt.option_value + '|' + u.id;
+                    var v = perAppMap.hasOwnProperty(k) ? perAppMap[k] : '';
+                    html += '<td class="per-app-col"><input type="number" min="0" placeholder="0"';
+                    html += ' class="form-control form-control-sm app-quota-input"';
+                    html += ' data-option-value="' + escapeHtml(opt.option_value) + '"';
+                    html += ' data-user-id="' + u.id + '" value="' + v + '"></td>';
+                });
+            }
+            html += '</tr>';
         });
-        html += '</tbody></table></div></div></div>';
+
+        if (hasGrid) {
+            html += '<tr class="table-light"><td colspan="2" class="text-end small fw-bold">Soma por aplicador</td>';
+            html += '<td class="small text-muted">—</td>';
+            allApplicators.forEach(function(u) {
+                html += '<td class="per-app-col text-center small app-col-sum" data-user-id="' + u.id + '">0</td>';
+            });
+            html += '</tr>';
+        }
+
+        html += '</tbody></table></div>';
+        if (hasGrid) {
+            html += '<div class="grid-warning alert alert-warning small mt-2 mb-0" style="display:none;"></div>';
+        }
+        html += '</div></div>';
 
         container.append(html);
+    });
+
+    // Colunas da grade comecam ocultas quando o toggle esta desligado
+    container.find('.question-card').each(function() {
+        var card = $(this);
+        if (!card.find('.per-applicator-toggle').prop('checked')) {
+            card.find('.per-app-col').hide();
+        }
+        refreshGrid(card);
     });
 }
 

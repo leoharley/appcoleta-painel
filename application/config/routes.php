@@ -78,6 +78,7 @@ $route['stratifications'] = 'stratifications/index';
 $route['stratifications/create'] = 'stratifications/create';
 $route['stratifications/edit/(:num)'] = 'stratifications/edit/$1';
 $route['stratifications/view/(:num)'] = 'stratifications/view/$1';
+$route['stratifications/duplicate/(:num)'] = 'stratifications/duplicate/$1';
 $route['stratifications/delete/(:num)'] = 'stratifications/delete/$1';
 $route['stratifications/ajax_get_questions/(:num)'] = 'stratifications/ajax_get_questions/$1';
 $route['stratifications/ajax_get_dimensions/(:num)'] = 'stratifications/ajax_get_dimensions/$1';

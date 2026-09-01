@@ -22,6 +22,121 @@ class Stratification_model extends CI_Model {
         return $this->db->update('stratifications', $data);
     }
 
+    /**
+     * Clona uma estratificacao (categorias, estratos e cotas por aplicador).
+     *
+     * Categorias 'applicator' e 'weekday' sao clonadas sempre — nao dependem
+     * do questionario. Categorias 'question' precisam de uma pergunta
+     * equivalente no destino: quando o destino e outro questionario, casamos
+     * pelo TEXTO da pergunta. O que nao casar e omitido e reportado.
+     *
+     * @param int $source_id       Estratificacao de origem
+     * @param string $new_title    Titulo da copia
+     * @param int $target_qid      Questionario de destino
+     * @param int|null $created_by
+     * @return array array('id' => int|null, 'skipped' => array de textos)
+     */
+    public function duplicate($source_id, $new_title, $target_qid, $created_by = null) {
+        $source = $this->get_by_id($source_id);
+        if (!$source) {
+            return array('id' => null, 'skipped' => array());
+        }
+
+        $target_qid = (int)$target_qid;
+        $same_questionnaire = ((int)$source->questionnaire_id === $target_qid);
+
+        $new_id = $this->create(array(
+            'questionnaire_id' => $target_qid,
+            'title' => $new_title,
+            'description' => $source->description,
+            'is_active' => $source->is_active ? TRUE : FALSE,
+            'created_by' => $created_by
+        ));
+
+        if (!$new_id) {
+            return array('id' => null, 'skipped' => array());
+        }
+
+        $skipped = array();
+        $order = 0;
+
+        foreach ($source->categories as $cat) {
+            $question_id = (int)$cat->question_id;
+
+            if ($cat->dimension_type === 'question') {
+                if (!$same_questionnaire) {
+                    // Casar a pergunta pelo texto no questionario de destino
+                    $question_id = $this->find_matching_question($cat->question_id, $target_qid);
+                    if (!$question_id) {
+                        $skipped[] = $cat->question_text
+                            ? $cat->question_text
+                            : $cat->category_name;
+                        continue;
+                    }
+                }
+                if (!$question_id) {
+                    $skipped[] = $cat->category_name;
+                    continue;
+                }
+            } else {
+                $question_id = 0;   // sentinel: applicator/weekday
+            }
+
+            $this->db->insert('stratification_categories', array(
+                'stratification_id' => $new_id,
+                'dimension_type' => $cat->dimension_type,
+                'question_id' => $question_id,
+                'category_name' => $cat->category_name,
+                'display_order' => $order++,
+                'created_at' => date('Y-m-d H:i:s')
+            ));
+            $new_cat_id = $this->db->insert_id();
+            if (!$new_cat_id) continue;
+
+            foreach ($cat->strata as $stratum) {
+                $this->db->insert('stratification_strata', array(
+                    'category_id' => $new_cat_id,
+                    'option_value' => $stratum->option_value,
+                    'option_label' => $stratum->option_label,
+                    'target_quota' => (int)$stratum->target_quota,
+                    'created_at' => date('Y-m-d H:i:s')
+                ));
+                $new_stratum_id = $this->db->insert_id();
+
+                // Cotas individuais por aplicador
+                if ($new_stratum_id && !empty($stratum->applicator_quotas)) {
+                    $this->save_applicator_quotas($new_stratum_id, $stratum->applicator_quotas);
+                }
+            }
+        }
+
+        return array('id' => $new_id, 'skipped' => $skipped);
+    }
+
+    /**
+     * Localiza, no questionario de destino, a pergunta com o mesmo texto
+     * da pergunta de origem. Retorna o id, ou null se nao houver.
+     */
+    private function find_matching_question($source_question_id, $target_qid) {
+        $src = $this->db->select('question_text')
+            ->from('questions')
+            ->where('id', (int)$source_question_id)
+            ->get()->row();
+
+        if (!$src) return null;
+
+        $this->db->select('id');
+        $this->db->from('questions');
+        $this->db->where('questionnaire_id', (int)$target_qid);
+        $this->db->where('LOWER(TRIM(question_text))', strtolower(trim($src->question_text)));
+        $this->db->where('is_active', 1);   // nao casar com pergunta desativada
+        $this->db->order_by('id', 'ASC');   // determinismo se houver duplicata
+        $this->db->limit(1);
+        $match = $this->db->get()->row();
+
+        return $match ? (int)$match->id : null;
+    }
+
     public function delete($id) {
         $this->db->where('id', $id);
         return $this->db->delete('stratifications');
@@ -102,6 +217,12 @@ class Stratification_model extends CI_Model {
             $this->db->where('category_id', $cat->id);
             $this->db->order_by('id', 'ASC');
             $cat->strata = $this->db->get('stratification_strata')->result();
+
+            // Cotas individuais por aplicador (vazio quando nao configuradas)
+            foreach ($cat->strata as &$stratum) {
+                $stratum->applicator_quotas = $this->get_applicator_quotas($stratum->id);
+            }
+            unset($stratum);
         }
 
         return $categories;
@@ -152,11 +273,86 @@ class Stratification_model extends CI_Model {
                         'created_at' => date('Y-m-d H:i:s')
                     );
                     $this->db->insert('stratification_strata', $stratum_data);
+                    $stratum_id = $this->db->insert_id();
+
+                    // Cotas individuais por aplicador (grade opcional).
+                    // Formato: $stratum['applicator_quotas'] = array(user_id => quota)
+                    if ($stratum_id && !empty($stratum['applicator_quotas'])
+                        && is_array($stratum['applicator_quotas'])) {
+                        $this->save_applicator_quotas($stratum_id, $stratum['applicator_quotas']);
+                    }
                 }
             }
         }
 
         return true;
+    }
+
+    /**
+     * Grava as cotas individuais de um estrato.
+     * Cotas <= 0 sao ignoradas (aplicador sem meta naquele estrato).
+     *
+     * @param int $stratum_id
+     * @param array $quotas  array(user_id => target_quota)
+     */
+    public function save_applicator_quotas($stratum_id, $quotas) {
+        $this->db->where('stratum_id', $stratum_id);
+        $this->db->delete('stratification_strata_applicator');
+
+        foreach ($quotas as $user_id => $quota) {
+            $user_id = (int)$user_id;
+            $quota = (int)$quota;
+            if ($user_id <= 0 || $quota <= 0) continue;
+
+            $this->db->insert('stratification_strata_applicator', array(
+                'stratum_id' => $stratum_id,
+                'user_id' => $user_id,
+                'target_quota' => $quota,
+                'created_at' => date('Y-m-d H:i:s')
+            ));
+        }
+        return true;
+    }
+
+    /**
+     * Cotas individuais de um estrato, indexadas por user_id.
+     *
+     * @return array array(user_id => target_quota)
+     */
+    public function get_applicator_quotas($stratum_id) {
+        $rows = $this->db->select('user_id, target_quota')
+            ->from('stratification_strata_applicator')
+            ->where('stratum_id', $stratum_id)
+            ->get()->result();
+
+        $out = array();
+        foreach ($rows as $r) {
+            $out[(int)$r->user_id] = (int)$r->target_quota;
+        }
+        return $out;
+    }
+
+    /**
+     * Cota individual de um aplicador em um estrato.
+     * Retorna null quando nao ha cota individual definida — o caller
+     * decide o fallback (normalmente a meta geral).
+     */
+    public function get_applicator_quota($stratum_id, $user_id) {
+        $row = $this->db->select('target_quota')
+            ->from('stratification_strata_applicator')
+            ->where('stratum_id', $stratum_id)
+            ->where('user_id', (int)$user_id)
+            ->get()->row();
+
+        return $row ? (int)$row->target_quota : null;
+    }
+
+    /**
+     * Indica se um estrato tem qualquer cota individual configurada.
+     */
+    public function stratum_has_applicator_quotas($stratum_id) {
+        return $this->db->where('stratum_id', $stratum_id)
+            ->count_all_results('stratification_strata_applicator') > 0;
     }
 
     // ==================== Progresso ====================

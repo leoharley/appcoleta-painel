@@ -158,6 +158,63 @@ class Stratifications extends CI_Controller {
     }
 
     /**
+     * Clonar estratificacao.
+     * GET  -> formulario (titulo + questionario de destino)
+     * POST -> executa a copia
+     */
+    public function duplicate($id) {
+        $stratification = $this->Stratification_model->get_by_id($id);
+        if (!$stratification) {
+            show_404();
+            return;
+        }
+
+        if ($this->input->method() === 'post') {
+            $this->form_validation->set_rules('title', 'Título', 'required|max_length[200]');
+            $this->form_validation->set_rules('questionnaire_id', 'Questionário', 'required|integer');
+
+            if ($this->form_validation->run() === TRUE) {
+                $this->db->trans_start();
+
+                $result = $this->Stratification_model->duplicate(
+                    $id,
+                    $this->input->post('title'),
+                    $this->input->post('questionnaire_id'),
+                    $this->session->userdata('user_id')
+                );
+
+                $this->db->trans_complete();
+
+                if ($this->db->trans_status() === FALSE || empty($result['id'])) {
+                    $this->session->set_flashdata('error', 'Erro ao clonar a estratificação.');
+                    redirect('stratifications');
+                    return;
+                }
+
+                if (!empty($result['skipped'])) {
+                    $this->session->set_flashdata('success',
+                        'Estratificação clonada. Categorias omitidas porque a pergunta '
+                        . 'não existe no questionário de destino: '
+                        . implode('; ', $result['skipped']) . '.');
+                } else {
+                    $this->session->set_flashdata('success', 'Estratificação clonada com sucesso!');
+                }
+
+                redirect('stratifications/edit/' . $result['id']);
+                return;
+            }
+        }
+
+        $data['title'] = 'Clonar Estratificação - AppColeta';
+        $data['stratification'] = $stratification;
+        $data['questionnaires'] = $this->db->select('id, title')->order_by('title', 'ASC')->get('questionnaires')->result();
+
+        $this->load->view('admin/header', $data);
+        $this->load->view('admin/stratifications/duplicate', $data);
+        $this->load->view('admin/footer');
+    }
+
+    /**
      * Excluir estratificacao
      */
     public function delete($id) {

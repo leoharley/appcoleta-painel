@@ -66,6 +66,10 @@
                                    class="btn btn-sm btn-outline-warning" title="Editar">
                                     <i class="fas fa-edit"></i>
                                 </a>
+                                <a href="<?= base_url('stratifications/duplicate/' . $strat->id) ?>"
+                                   class="btn btn-sm btn-outline-secondary" title="Clonar">
+                                    <i class="fas fa-copy"></i>
+                                </a>
                                 <a href="<?= base_url('stratifications/delete/' . $strat->id) ?>"
                                    class="btn btn-sm btn-outline-danger" title="Excluir"
                                    onclick="return confirm('Tem certeza que deseja excluir esta estratificação?')">

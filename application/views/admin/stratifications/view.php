@@ -23,6 +23,9 @@
                 <a href="<?= base_url('stratifications/edit/' . $stratification->id) ?>" class="btn btn-outline-warning me-2">
                     <i class="fas fa-edit me-1"></i>Editar
                 </a>
+                <a href="<?= base_url('stratifications/duplicate/' . $stratification->id) ?>" class="btn btn-outline-secondary me-2">
+                    <i class="fas fa-copy me-1"></i>Clonar
+                </a>
                 <a href="<?= base_url('stratifications') ?>" class="btn btn-secondary">
                     <i class="fas fa-arrow-left me-1"></i>Voltar
                 </a>
