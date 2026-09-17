@@ -721,10 +721,17 @@ class Responses extends CI_Controller {
      * Determinar tipo da célula
      */
     private function _get_cell_type($value) {
+        // Identificadores (telefone, CPF, CEP) sao inteiros longos: como
+        // 'Number' o Excel exibe "3,33333E+12" e perde zeros a esquerda.
+        // Vao como texto. Quantidades e valores seguem numericos.
+        if (preg_match('/^-?\d+$/', (string)$value) && strlen(ltrim((string)$value, '-')) >= 7) {
+            return 'String';
+        }
+
         if (is_numeric($value) && !preg_match('/^0/', $value) && strlen($value) < 15) {
             return 'Number';
         }
-        
+
         return 'String';
     }
     

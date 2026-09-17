@@ -202,7 +202,7 @@ function format_location_name($data)
                                 </div>
                             <?php elseif ($answer->response_number !== null): ?>
                                 <div class="bg-light p-3 rounded">
-                                    <strong><?= number_format($answer->response_number, 2) ?></strong>
+                                    <strong><?= format_response_number($answer->response_number) ?></strong>
                                 </div>
                             <?php elseif ($answer->response_date): ?>
                                 <div class="bg-light p-3 rounded">

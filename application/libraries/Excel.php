@@ -9,6 +9,7 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Style\Font;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
 class Excel
 {
@@ -94,7 +95,8 @@ class Excel
                             if (isset($questionMap[$questionId])) {
                                 $colIndex = $questionMap[$questionId] + 1; // +1 porque setCellValueByColumnAndRow é 1-indexed
                                 $value = isset($answer->value) ? $answer->value : '';
-                                $sheetColetas->setCellValueByColumnAndRow($colIndex, $row, is_string($value) ? mb_strtoupper($value, 'UTF-8') : $value);
+                                if (is_string($value)) $value = mb_strtoupper($value, 'UTF-8');
+                                self::write_answer_cell($sheetColetas, $colIndex, $row, $value);
                             }
                         }
                     }
@@ -332,6 +334,36 @@ class Excel
      *                         e idealmente options[] para radio/select/checkbox).
      * @return string
      */
+    /**
+     * Escreve a resposta na celula preservando o que foi digitado.
+     *
+     * Sem tipo explicito o PhpSpreadsheet infere, e identificadores longos
+     * (telefone, CPF, CEP) viram numero — o Excel entao exibe "3,33333E+12"
+     * e zeros a esquerda somem. Esses casos vao como TEXTO.
+     *
+     * Quantidades e valores continuam numericos, para permitir soma e
+     * ordenacao corretas na planilha.
+     */
+    private static function write_answer_cell($sheet, $col, $row, $value) {
+        $str = trim((string)$value);
+
+        $force_text = false;
+        if ($str !== '' && preg_match('/^-?\d+$/', $str)) {
+            // Inteiro com 7+ digitos, ou com zero a esquerda -> identificador
+            $digits = ltrim($str, '-');
+            if (strlen($digits) >= 7 || $digits[0] === '0') {
+                $force_text = true;
+            }
+        }
+
+        if ($force_text && method_exists($sheet, 'setCellValueExplicitByColumnAndRow')) {
+            $sheet->setCellValueExplicitByColumnAndRow($col, $row, $str, DataType::TYPE_STRING);
+            return;
+        }
+
+        $sheet->setCellValueByColumnAndRow($col, $row, $value);
+    }
+
     public static function extract_answer_by_type($ans, $question) {
         $type = isset($question->question_type) ? $question->question_type : 'text';
 
@@ -416,9 +448,13 @@ class Excel
         if ($as_date !== null) return $as_date;
 
         // B) Limpeza de lixo no fim
-        // 1) Fragmento de data com separadores precedido de espaço
-        $s = preg_replace('/\s+\d{1,2}(?:[\/\-\.]\d{0,4}){0,2}[\/\-\.]?\s*$/u', '', $s);
-        // 2) 2+ dígitos colados em palavra no fim
+        // 1) Fragmento de DATA no fim, precedido de espaco. Exige ao menos um
+        //    separador (/ - .) para ser considerado data — sem isso, um numero
+        //    solto no fim e dado legitimo (numero de casa, apartamento, km) e
+        //    deve ser PRESERVADO. Ex.: "BALAIADAS 30", "JOAO 2", "RUA X 1500".
+        $s = preg_replace('/\s+\d{1,2}[\/\-\.]\d{0,4}(?:[\/\-\.]\d{0,4})?\s*$/u', '', $s);
+        // 2) 2+ digitos colados em palavra no fim ("ASSIS03" -> "ASSIS").
+        //    Exige o digito COLADO na letra; com espaco e dado legitimo.
         $s = preg_replace('/([\p{L}])\d{2,}\s*$/u', '$1', $s);
 
         return trim($s);
@@ -427,7 +463,18 @@ class Excel
     /** Extrai a parte numérica de uma string ("R$ 1.234,56" -> "1234,56"). */
     public static function normalize_number($v) {
         if ($v === null) return '';
-        $s = (string)$v;
+        $s = trim((string)$v);
+        if ($s === '') return '';
+
+        // Identificadores (telefone, CPF, CEP) nao sao quantidades: limpar a
+        // pontuacao produziria lixo como "3498421-5272" a partir de
+        // "(34) 98421-5272". Quando so restam digitos e sao 7 ou mais,
+        // devolve APENAS os digitos — formato limpo e comparavel.
+        $digits_only = preg_replace('/\D/', '', $s);
+        if (strlen($digits_only) >= 7 && !preg_match('/[,.]\d{1,2}$/', $s)) {
+            return $digits_only;
+        }
+
         // Mantém apenas dígitos, vírgula, ponto, sinal
         $clean = preg_replace('/[^\d.,\-+]/', '', $s);
         return $clean;
