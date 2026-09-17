@@ -304,6 +304,40 @@ function get_location_name_cached($latitude, $longitude)
 <div class="card">
     <div class="card-body">
         <?php if (!empty($responses)): ?>
+
+        <?php
+            $shown = count($responses);
+            $total = isset($total_count) ? (int)$total_count : $shown;
+            $lim   = isset($limit) ? (int)$limit : $shown;
+        ?>
+        <?php if ($total > $shown): ?>
+        <div class="alert alert-warning py-2 small d-flex justify-content-between align-items-center">
+            <div>
+                <i class="fas fa-info-circle me-1"></i>
+                Exibindo as <strong><?= number_format($shown, 0, ',', '.') ?></strong> respostas mais
+                recentes de <strong><?= number_format($total, 0, ',', '.') ?></strong> no total.
+                Use os <strong>Filtros</strong> para localizar respostas específicas.
+            </div>
+            <div class="ms-3 text-nowrap">
+                <?php
+                    // Reconstroi a URL apenas com os filtros conhecidos —
+                    // repassar $_GET inteiro deixaria entrar parametro qualquer.
+                    $qs = array();
+                    foreach (array('questionnaire_id','applied_by','date_from','date_to','sync_status') as $k) {
+                        if (!empty($filters[$k])) $qs[$k] = $filters[$k];
+                    }
+                    $qs['limit'] = min($lim * 2, 5000);
+                    $more_url = base_url('responses') . '?' . http_build_query($qs);
+                ?>
+                <?php if ($lim < 5000): ?>
+                <a href="<?= $more_url ?>" class="btn btn-sm btn-outline-secondary">
+                    Carregar mais
+                </a>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <div class="table-responsive">
             <table class="table data-table">
                 <thead>
@@ -340,18 +374,16 @@ function get_location_name_cached($latitude, $longitude)
                         <td>
                             <?php if ($response->latitude && $response->longitude): ?>
                                 <div class="location-info" data-lat="<?= $response->latitude ?>" data-lng="<?= $response->longitude ?>">
-                                    <div class="location-loading">
-                                        <i class="fas fa-spinner fa-spin me-1"></i>
-                                        <span class="loading-text">Carregando localização...</span>
-                                    </div>
-                                    <div class="location-content" style="display: none;">
-                                        <strong class="location-name"></strong>
-                                        <br><small class="text-muted">
-                                            <i class="fas fa-map-pin me-1"></i>
-                                            <?= number_format($response->latitude, 4) ?>, 
-                                            <?= number_format($response->longitude, 4) ?>
-                                        </small>
-                                    </div>
+                                    <small class="text-muted d-block">
+                                        <i class="fas fa-map-pin me-1"></i>
+                                        <?= number_format($response->latitude, 5) ?>,
+                                        <?= number_format($response->longitude, 5) ?>
+                                    </small>
+                                    <strong class="location-name d-block small text-dark" style="display:none!important;"></strong>
+                                    <button type="button" class="btn btn-link btn-sm p-0 location-btn"
+                                            onclick="lookupAddress(this)" title="Consultar o endereço destas coordenadas">
+                                        <i class="fas fa-search-location me-1"></i>Ver endereço
+                                    </button>
                                 </div>
                             <?php else: ?>
                                 <span class="text-muted">
@@ -447,18 +479,6 @@ function get_location_name_cached($latitude, $longitude)
             </table>
         </div>
         
-        <!-- Loading indicator global para geocodificação -->
-        <div id="geocoding-global-loading" class="alert alert-info text-center" style="display: none;">
-            <div class="d-flex align-items-center justify-content-center">
-                <i class="fas fa-spinner fa-spin me-2"></i>
-                <div>
-                    <strong>Carregando informações de localização...</strong>
-                    <br>
-                    <small>Aguarde enquanto buscamos os endereços das coordenadas (<span id="loading-progress">0</span> de <span id="total-locations">0</span>)</small>
-                </div>
-            </div>
-        </div>
-        
         <?php else: ?>
         <div class="text-center py-5">
             <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
@@ -485,16 +505,10 @@ function get_location_name_cached($latitude, $longitude)
 </div>
 
 <style>
-/* Loading states */
-.location-loading {
-    font-size: 0.8rem;
-    color: #6c757d;
-}
 
 .location-info {
     max-width: 200px;
     word-wrap: break-word;
-    min-height: 40px;
 }
 
 .table td {
@@ -512,9 +526,6 @@ function get_location_name_cached($latitude, $longitude)
     to { opacity: 1; }
 }
 
-.location-content {
-    animation: fadeIn 0.5s ease-in;
-}
 
 /* Pulse animation para loading */
 @keyframes pulse {
@@ -526,10 +537,17 @@ function get_location_name_cached($latitude, $longitude)
     animation: pulse 1.5s infinite;
 }
 
-/* Alert personalizado */
-#geocoding-global-loading {
-    margin-bottom: 1rem;
-    border-left: 4px solid #0d6efd;
+/* Botao "Ver endereco" — discreto, alinhado ao texto da celula */
+.location-btn {
+    font-size: 0.78rem;
+    text-decoration: none;
+}
+.location-btn:hover {
+    text-decoration: underline;
+}
+.location-name {
+    line-height: 1.25;
+    margin-top: 2px;
 }
 
 /* Estilos para o modal de exportação */
@@ -563,7 +581,10 @@ function get_location_name_cached($latitude, $longitude)
 const GEO_BASE_URL   = '<?= base_url("responses/get_location") ?>';
 const GEO_CACHE_KEY  = 'geo_cache_v2';       // versão pra invalidar caches antigos
 const GEO_TIMEOUT_MS = 6000;
-const GEO_CONCURRENCY = 4;                    // requisições simultâneas
+// Nominatim pede no maximo ~1 req/s por cliente: com valor alto ele
+// responde devagar ou bloqueia, o que piora o tempo total em vez de
+// melhorar. 2 e o equilibrio — o ganho real vem do cache e de nao
+// segurar o lock da sessao no servidor.
 const GEO_ROUND_DECIMALS = 4;                 // ~11 metros
 
 const _geoMem = new Map();   // cache in-memory (dentro da mesma página)
@@ -615,89 +636,43 @@ async function fetchLocationName(lat, lng) {
     }
 }
 
-function updateLocationUI(element, locationName) {
-    const loadingDiv = element.querySelector('.location-loading');
-    const contentDiv = element.querySelector('.location-content');
-    const nameSpan   = element.querySelector('.location-name');
+/**
+ * Consulta o endereco de UMA resposta, sob demanda (clique no botao).
+ *
+ * A geocodificacao reversa automatica foi removida: ela disparava uma
+ * requisicao por linha ao abrir a tela, o que deixava a navegacao lenta.
+ * As coordenadas ja aparecem direto do banco; o endereco so e buscado
+ * quando o usuario pede.
+ */
+async function lookupAddress(btn) {
+    const box = btn.closest(".location-info");
+    if (!box) return;
 
-    if (loadingDiv) loadingDiv.style.display = 'none';
-    if (contentDiv) contentDiv.style.display = 'block';
-    if (nameSpan)   nameSpan.textContent = locationName || '—';
-}
-
-function updateProgress(current, total) {
-    const progressSpan = document.getElementById('loading-progress');
-    const totalSpan    = document.getElementById('total-locations');
-    if (progressSpan) progressSpan.textContent = current;
-    if (totalSpan)    totalSpan.textContent = total;
-    if (current >= total) {
-        setTimeout(() => {
-            const g = document.getElementById('geocoding-global-loading');
-            if (g) g.style.display = 'none';
-        }, 500);
-    }
-}
-
-async function loadSingleLocation(element, done, total) {
-    const lat = parseFloat(element.getAttribute('data-lat'));
-    const lng = parseFloat(element.getAttribute('data-lng'));
+    const lat = parseFloat(box.getAttribute("data-lat"));
+    const lng = parseFloat(box.getAttribute("data-lng"));
+    const out = box.querySelector(".location-name");
 
     if (!isFinite(lat) || !isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-        updateLocationUI(element, 'Coordenadas inválidas');
-        updateProgress(done, total);
+        btn.outerHTML = '<small class="text-danger">Coordenadas invalidas</small>';
         return;
     }
 
-    let name = await fetchLocationName(lat, lng);
-    if (!name) {
-        // Fallback: mostrar as próprias coordenadas em vez de "Carregando..." infinito
-        name = lat.toFixed(5) + ', ' + lng.toFixed(5);
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-circle-notch fa-spin me-1"></i>Buscando...';
+
+    const name = await fetchLocationName(lat, lng);
+
+    if (name) {
+        out.textContent = name;
+        out.style.setProperty("display", "block", "important");
+        btn.remove();               // resolvido: botao nao e mais necessario
+    } else {
+        btn.disabled = false;
+        btn.innerHTML = original;
+        btn.classList.add("text-danger");
+        btn.title = "Nao foi possivel obter o endereco. Clique para tentar de novo.";
     }
-    updateLocationUI(element, name);
-    updateProgress(done, total);
-}
-
-// Fila com concorrência limitada — muitos elementos ao mesmo tempo, mas
-// no máximo GEO_CONCURRENCY requests HTTP em voo.
-async function loadAllLocations() {
-    const els = Array.from(document.querySelectorAll('.location-info[data-lat][data-lng]'));
-    const total = els.length;
-    if (total === 0) return;
-
-    // Marca imediatamente as que já estão em cache (sem esperar nada)
-    let doneCount = 0;
-    const pending = [];
-    for (const el of els) {
-        const lat = parseFloat(el.getAttribute('data-lat'));
-        const lng = parseFloat(el.getAttribute('data-lng'));
-        const cached = (isFinite(lat) && isFinite(lng)) ? geoGetCached(lat, lng) : null;
-        if (cached) {
-            updateLocationUI(el, cached);
-            doneCount++;
-        } else {
-            pending.push(el);
-        }
-    }
-    updateProgress(doneCount, total);
-
-    if (pending.length === 0) return;
-
-    const globalLoading = document.getElementById('geocoding-global-loading');
-    if (globalLoading) globalLoading.style.display = 'block';
-
-    // Worker pool
-    let cursor = 0;
-    async function worker() {
-        while (cursor < pending.length) {
-            const idx = cursor++;
-            await loadSingleLocation(pending[idx], ++doneCount, total);
-        }
-    }
-    const workers = [];
-    for (let i = 0; i < Math.min(GEO_CONCURRENCY, pending.length); i++) {
-        workers.push(worker());
-    }
-    await Promise.all(workers);
 }
 
 function showPhoto(photoUrl) {
@@ -755,26 +730,10 @@ function validateExportForm() {
 
 // Inicializar quando DOM estiver pronto
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM carregado, iniciando carregamento de localizações...');
+    // A geocodificacao reversa NAO roda mais automaticamente: as
+    // coordenadas ja vem do banco e o endereco e buscado sob demanda
+    // pelo botao "Ver endereco" de cada linha (ver lookupAddress).
 
-    // Delay curto para o DataTables terminar a inicialização
-    setTimeout(() => {
-        loadAllLocations().catch(err => console.error('geo:', err));
-    }, 300);
-
-    // Reprocessar sempre que o DataTables redesenhar a tabela
-    // (paginação, ordenação, busca) — cache local torna isso instantâneo
-    // para itens já resolvidos, e só as novas rows visíveis fazem fetch.
-    if (window.jQuery && jQuery.fn.DataTable) {
-        jQuery(document).on('draw.dt', '.data-table', function() {
-            // Pequeno debounce para não repetir em drawings encadeados
-            clearTimeout(window.__geoDrawDebounce);
-            window.__geoDrawDebounce = setTimeout(() => {
-                loadAllLocations().catch(err => console.error('geo(draw):', err));
-            }, 100);
-        });
-    }
-    
     // NOVO: Adicionar validação ao formulário de exportação
     const exportForm = document.getElementById('exportRawDataForm');
     if (exportForm) {

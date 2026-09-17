@@ -12,7 +12,38 @@ class Forms extends CI_Controller {
         header('Content-Type: application/json');
     }
 
+    /**
+     * Garante resposta JSON mesmo em erro fatal do PHP (memoria estourada,
+     * timeout, erro nao capturavel por try/catch). Sem isso o app recebe
+     * HTML, nao consegue interpretar, e o diagnostico fica as cegas.
+     */
+    private function register_fatal_json_handler() {
+        register_shutdown_function(function () {
+            $err = error_get_last();
+            if (!$err || !in_array($err['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) {
+                return;
+            }
+            if (headers_sent()) return;
+
+            // Erro fatal apos trans_begin: a transacao nao foi commitada,
+            // o MySQL desfaz ao encerrar a conexao. Nenhum id e devolvido,
+            // entao o app mantem a coleta e reenvia.
+            log_message('error', 'forms/submit FATAL — ' . $err['message']
+                . ' em ' . $err['file'] . ':' . $err['line']);
+
+            http_response_code(500);
+            header('Content-Type: application/json');
+            echo json_encode([
+                'success' => false,
+                'message' => 'Erro interno ao gravar o formulário. Reenvie.',
+                'fatal'   => true
+            ]);
+        });
+    }
+
     public function submit() {
+        $this->register_fatal_json_handler();
+
         if ($this->input->method() !== 'post') {
             $this->output->set_status_header(405);
             echo json_encode(['success' => false, 'message' => 'Method not allowed']);
@@ -25,11 +56,38 @@ class Forms extends CI_Controller {
             return;
         }
 
-        $json = json_decode(file_get_contents('php://input'), true);
-        
+        $raw = file_get_contents('php://input');
+
+        // Payload maior que post_max_size: o PHP descarta o corpo e entrega
+        // vazio, mas o Content-Length informado vem grande. Sem distinguir
+        // esse caso, o app recebia "Invalid JSON" e o motivo real ficava
+        // invisivel — uma das causas possiveis de coleta perdida.
+        $declared_len = isset($_SERVER['CONTENT_LENGTH']) ? (int)$_SERVER['CONTENT_LENGTH'] : 0;
+        if ($raw === '' && $declared_len > 0) {
+            log_message('error', 'forms/submit — corpo vazio com Content-Length='
+                . $declared_len . '. Provavel post_max_size ('
+                . ini_get('post_max_size') . ') excedido.');
+            $this->output->set_status_header(413);
+            echo json_encode([
+                'success' => false,
+                'message' => 'Payload excede o limite do servidor (post_max_size='
+                    . ini_get('post_max_size') . ').',
+                'limit_exceeded' => true
+            ]);
+            return;
+        }
+
+        $json = json_decode($raw, true);
+
         if (!$json) {
+            log_message('error', 'forms/submit — JSON invalido. bytes=' . strlen($raw)
+                . ' json_error=' . json_last_error_msg());
             $this->output->set_status_header(400);
-            echo json_encode(['success' => false, 'message' => 'Invalid JSON data']);
+            echo json_encode([
+                'success' => false,
+                'message' => 'Invalid JSON data',
+                'json_error' => json_last_error_msg()
+            ]);
             return;
         }
 
@@ -44,7 +102,13 @@ class Forms extends CI_Controller {
         }
 
         try {
-            $this->db->trans_start();
+            // Transacao MANUAL (trans_begin/commit/rollback) em vez de
+            // trans_start/trans_complete: com o modo automatico, depois do
+            // trans_complete a transacao ja foi encerrada e o
+            // trans_rollback do catch nao tem efeito. O app trata o id como
+            // prova definitiva de gravacao, entao o commit precisa ser
+            // explicito e verificavel.
+            $this->db->trans_begin();
 
             // Normalização da localização — preserva NULL quando ausente, vazio ou inválido.
             // Nunca converter null/"" para 0 (0,0 é um ponto no oceano).
@@ -77,13 +141,9 @@ class Forms extends CI_Controller {
                     ->get_where('form_responses', array('client_id' => $client_id))
                     ->row();
                 if ($dup) {
-                    $this->db->trans_complete();
-                    echo json_encode([
-                        'success' => true,
-                        'form_response_id' => (int)$dup->id,
-                        'duplicated' => true,
-                        'message' => 'Form already synced (deduplicated by client_id)'
-                    ]);
+                    $this->db->trans_commit();   // nada a gravar; so encerra
+                    $this->respond_success((int)$dup->id, false, true,
+                        'Form already synced (deduplicated by client_id)');
                     return;
                 }
             }
@@ -114,13 +174,37 @@ class Forms extends CI_Controller {
                 $form_response_id = $server_id_in;
                 $this->db->where('form_response_id', $form_response_id)->delete('question_responses');
             } else {
+                // db_debug OFF no INSERT: uma violacao do UNIQUE de client_id
+                // (dois envios simultaneos do mesmo formulario) e um caso
+                // ESPERADO, nao um erro — precisa ser tratado, nao abortar.
+                $prev_debug = $this->db->db_debug;
+                $this->db->db_debug = FALSE;
                 $form_response_id = $this->Response_model->create($form_data);
+                $this->db->db_debug = $prev_debug;
+
                 if (!$form_response_id) {
+                    // Corrida no UNIQUE: o outro envio ja gravou. Recupera o
+                    // id existente e responde sucesso — sem isso o app
+                    // receberia 500 e reenviaria indefinidamente.
+                    if ($client_id) {
+                        $this->db->trans_rollback();
+                        $existing = $this->db->select('id')
+                            ->get_where('form_responses', array('client_id' => $client_id))
+                            ->row();
+                        if ($existing) {
+                            $this->respond_success((int)$existing->id, false, true,
+                                'Form already synced (concurrent submit)');
+                            return;
+                        }
+                        // Nao foi duplicidade: segue para o erro normal.
+                        throw new Exception('Failed to create form response');
+                    }
                     throw new Exception('Failed to create form response');
                 }
             }
 
             // Salvar respostas individuais
+            $saved_answers = 0;
             foreach ($json['responses'] as $response) {
                 if (!isset($response['question_id'])) {
                     continue;
@@ -136,27 +220,106 @@ class Forms extends CI_Controller {
                     'selected_options'  => isset($response['selected_options']) ? json_encode($response['selected_options']) : null
                 ];
 
-                $this->Response_model->create_answer($answer_data);
+                // Verifica CADA item: antes o retorno era ignorado e um item
+                // rejeitado (ex.: question_id inexistente) passava despercebido,
+                // gravando a coleta incompleta.
+                if (!$this->Response_model->create_answer($answer_data)) {
+                    throw new Exception('Failed to save answer for question '
+                        . $response['question_id']);
+                }
+                $saved_answers++;
             }
-
-            $this->db->trans_complete();
 
             if ($this->db->trans_status() === FALSE) {
                 throw new Exception('Transaction failed');
             }
 
-            echo json_encode([
-                'success'          => true,
-                'form_response_id' => (int)$form_response_id,
-                'edited'           => $is_edit,
-                'message'          => $is_edit ? 'Form updated successfully' : 'Form submitted successfully'
-            ]);
+            // Commit EXPLICITO. So depois dele o id pode ser devolvido: o app
+            // trata o id como prova definitiva de gravacao e para de reenviar.
+            $this->db->trans_commit();
+
+            log_message('info', 'forms/submit OK — id=' . $form_response_id
+                . ' itens=' . $saved_answers
+                . ' client_id=' . ($client_id ?: '-')
+                . ' edit=' . ($is_edit ? '1' : '0'));
+
+            $this->respond_success((int)$form_response_id, $is_edit, false,
+                $is_edit ? 'Form updated successfully' : 'Form submitted successfully');
 
         } catch (Exception $e) {
+            // Rollback real: com trans_begin a transacao ainda esta aberta aqui.
             $this->db->trans_rollback();
+
+            log_message('error', 'forms/submit FALHOU — ' . $e->getMessage()
+                . ' | client_id=' . (isset($client_id) ? ($client_id ?: '-') : '-')
+                . ' | questionnaire_id=' . ($json['questionnaire_id'] ?? '-')
+                . ' | applied_by=' . ($json['applied_by'] ?? '-'));
+
             $this->output->set_status_header(500);
-            echo json_encode(['success' => false, 'message' => 'Failed to submit form: ' . $e->getMessage()]);
+            // NUNCA devolver id aqui: o app mantem a resposta no aparelho.
+            echo json_encode([
+                'success' => false,
+                'message' => 'Failed to submit form: ' . $e->getMessage()
+            ]);
         }
+    }
+
+    /**
+     * Resposta de sucesso do submit.
+     *
+     * Devolve o id em VARIOS formatos de proposito: `form_response_id` na
+     * raiz (o que o app em producao ja le hoje), mais `id` e `data.id`.
+     * Assim nenhuma versao do app em campo deixa de confirmar a gravacao.
+     *
+     * So deve ser chamada APOS o commit.
+     */
+    private function respond_success($id, $is_edit, $duplicated, $message) {
+        $this->output->set_status_header(200);
+        echo json_encode([
+            'success'          => true,
+            'id'               => (int)$id,
+            'form_response_id' => (int)$id,
+            'data'             => ['id' => (int)$id],
+            'edited'           => (bool)$is_edit,
+            'duplicated'       => (bool)$duplicated,
+            'message'          => $message
+        ]);
+    }
+
+    /**
+     * GET /api/forms/diag — limites do servidor que podem derrubar envios.
+     * Exige token (mesma autenticacao do submit). Nao expoe dado sensivel:
+     * apenas configuracao de limites e presenca de indice.
+     */
+    public function diag() {
+        $user_id = $this->verify_auth();
+        if (!$user_id) return;
+
+        $has_client_id = FALSE;
+        $has_unique = FALSE;
+        try {
+            $cols = $this->db->query("SHOW COLUMNS FROM form_responses LIKE 'client_id'")->result();
+            $has_client_id = !empty($cols);
+            $idx = $this->db->query("SHOW INDEX FROM form_responses WHERE Key_name = 'uq_form_responses_client_id'")->result();
+            $has_unique = !empty($idx);
+        } catch (Exception $e) { /* ignora */ }
+
+        echo json_encode([
+            'success' => true,
+            'php' => [
+                'post_max_size'       => ini_get('post_max_size'),
+                'upload_max_filesize' => ini_get('upload_max_filesize'),
+                'max_input_vars'      => ini_get('max_input_vars'),
+                'memory_limit'        => ini_get('memory_limit'),
+                'max_execution_time'  => ini_get('max_execution_time'),
+                'version'             => PHP_VERSION,
+            ],
+            'idempotencia' => [
+                'coluna_client_id' => $has_client_id,
+                'unique_client_id' => $has_unique,
+            ],
+            'log_path' => APPPATH . 'logs/',
+        ], JSON_PRETTY_PRINT);
     }
 
     private function verify_auth() {

@@ -26,6 +26,13 @@ if (!function_exists('format_response_number')) {
 
         $raw = trim((string)$value);
 
+        // A coluna response_number e DECIMAL, entao o banco devolve
+        // "38998595903.00000000000000000000". Casas decimais nulas nao
+        // fazem parte do dado: descarta antes de qualquer analise.
+        if (preg_match('/^([+-]?\d+)[.,]0+$/', $raw, $m)) {
+            $raw = $m[1];
+        }
+
         // Guarda o texto original quando ele ja e um inteiro puro: assim
         // preservamos zeros a esquerda (ex.: CEP "01310200").
         $is_plain_integer = (bool)preg_match('/^-?\d+$/', $raw);

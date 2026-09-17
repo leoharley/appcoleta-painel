@@ -68,8 +68,28 @@
                 // Inicializar DataTables
                 $('.data-table').DataTable({
                     responsive: true,
+                    // Traducao embutida em vez de buscar no CDN: com
+                    // language.url o DataTables ESPERA o download antes de
+                    // desenhar a tabela — se o CDN estiver lento, a tela
+                    // fica em branco ate ele responder.
                     language: {
-                        url: 'https://cdn.datatables.net/plug-ins/1.13.6/i18n/pt-BR.json'
+                        emptyTable: "Nenhum registro encontrado",
+                        info: "Mostrando _START_ até _END_ de _TOTAL_ registros",
+                        infoEmpty: "Mostrando 0 até 0 de 0 registros",
+                        infoFiltered: "(filtrado de _MAX_ registros no total)",
+                        lengthMenu: "Exibir _MENU_ registros",
+                        loadingRecords: "Carregando...",
+                        processing: "Processando...",
+                        search: "Pesquisar:",
+                        zeroRecords: "Nenhum registro encontrado",
+                        paginate: {
+                            first: "Primeiro", last: "Último",
+                            next: "Próximo", previous: "Anterior"
+                        },
+                        aria: {
+                            sortAscending: ": ative para ordenar crescente",
+                            sortDescending: ": ative para ordenar decrescente"
+                        }
                     },
                     order: [[5, "desc"]], // Ordenar por Data/Hora descendente (mais recente primeiro)
                     columnDefs: [

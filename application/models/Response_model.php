@@ -17,7 +17,16 @@ class Response_model extends CI_Model {
         return $this->db->get()->result();
     }
 
-    public function get_filtered($filters = array()) {
+    /**
+     * Respostas filtradas para a listagem do painel.
+     *
+     * @param array $filters
+     * @param int|null $limit  Maximo de linhas. Sem limite a tela carregava
+     *                         TODAS as respostas do banco (milhares), gerando
+     *                         um HTML gigante que o DataTables ainda indexava
+     *                         no navegador — era a causa da lentidao.
+     */
+    public function get_filtered($filters = array(), $limit = null) {
         $this->db->select('fr.*, q.title as questionnaire_title, u.full_name as applied_by_name');
         $this->db->from('form_responses fr');
         $this->db->join('questionnaires q', 'fr.questionnaire_id = q.id', 'left');
@@ -48,7 +57,33 @@ class Response_model extends CI_Model {
         }
 
         $this->db->order_by('fr.created_at', 'DESC');
+        if ($limit !== null && (int)$limit > 0) {
+            $this->db->limit((int)$limit);
+        }
         return $this->db->get()->result();
+    }
+
+    /** Total de respostas que atendem aos filtros (para informar o usuario). */
+    public function count_filtered($filters = array()) {
+        $this->db->from('form_responses fr');
+
+        if (isset($filters['questionnaire_id']) && $filters['questionnaire_id']) {
+            $this->db->where('fr.questionnaire_id', $filters['questionnaire_id']);
+        }
+        if (isset($filters['applied_by']) && $filters['applied_by']) {
+            $this->db->where('fr.applied_by', $filters['applied_by']);
+        }
+        if (isset($filters['date_from']) && $filters['date_from']) {
+            $this->db->where('DATE(fr.completed_at) >=', $filters['date_from']);
+        }
+        if (isset($filters['date_to']) && $filters['date_to']) {
+            $this->db->where('DATE(fr.completed_at) <=', $filters['date_to']);
+        }
+        if (isset($filters['sync_status']) && $filters['sync_status']) {
+            $this->db->where('fr.sync_status', $filters['sync_status']);
+        }
+
+        return (int)$this->db->count_all_results();
     }
 
     public function get_by_id($id) {

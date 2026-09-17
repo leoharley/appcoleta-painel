@@ -37,7 +37,16 @@ class Responses extends CI_Controller {
             $filters['sync_status'] = $this->input->get('sync_status');
         }
 
-        $data['responses'] = $this->Response_model->get_filtered($filters);
+        // Limite de linhas carregadas. Sem ele a tela trazia TODAS as
+        // respostas (milhares), o que travava a renderizacao. O usuario pode
+        // aumentar com ?limit=N, ou usar os filtros para recortar o periodo.
+        $limit = (int)$this->input->get('limit');
+        if ($limit <= 0)    $limit = 300;      // padrao
+        if ($limit > 5000)  $limit = 5000;     // teto de seguranca
+
+        $data['responses']    = $this->Response_model->get_filtered($filters, $limit);
+        $data['total_count']  = $this->Response_model->count_filtered($filters);
+        $data['limit']        = $limit;
         // Traz também os bloqueados/inativos para o gestor consultar os
         // dados coletados desses questionários.
         $data['questionnaires'] = $this->Questionnaire_model->get_all_for_panel();
@@ -724,7 +733,9 @@ class Responses extends CI_Controller {
         // Identificadores (telefone, CPF, CEP) sao inteiros longos: como
         // 'Number' o Excel exibe "3,33333E+12" e perde zeros a esquerda.
         // Vao como texto. Quantidades e valores seguem numericos.
-        if (preg_match('/^-?\d+$/', (string)$value) && strlen(ltrim((string)$value, '-')) >= 7) {
+        // Considera tambem o DECIMAL do banco ("38998595903.0000...").
+        $int_part = preg_replace('/^([+-]?\d+)[.,]0+$/', '$1', (string)$value);
+        if (preg_match('/^-?\d+$/', $int_part) && strlen(ltrim($int_part, '-')) >= 7) {
             return 'String';
         }
 
@@ -1057,6 +1068,16 @@ class Responses extends CI_Controller {
             $this->output->set_content_type('text/plain');
             echo 'N/A';
             return;
+        }
+
+        // IMPORTANTE: libera o lock da sessao ANTES da chamada externa.
+        // O handler de sessao do CI mantem o arquivo/linha bloqueado durante
+        // toda a requisicao, entao varias chamadas de geocodificacao (e
+        // qualquer clique do usuario) ficavam ENFILEIRADAS atras de uma
+        // consulta de ate 5s ao Nominatim — era isso que "travava" a tela.
+        // Aqui so lemos dados externos; nada e gravado na sessao depois.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
         }
 
         try {

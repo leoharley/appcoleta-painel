@@ -26,6 +26,7 @@ $route['api/auth/login'] = 'api/auth/login';
 $route['api/auth/verify'] = 'api/auth/verify';
 $route['api/questionnaires'] = 'api/questionnaires/index';
 $route['api/forms/submit'] = 'api/forms/submit';
+$route['api/forms/diag'] = 'api/forms/diag';
 $route['api/photos/upload'] = 'api/photos/upload';
 $route['api/audios/upload'] = 'api/audios/upload';
 

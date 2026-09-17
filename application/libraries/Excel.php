@@ -374,9 +374,23 @@ class Excel
                 return self::clean_text_trailing_junk((string)($ans->response_text ?? ''));
 
             case 'number':
-                $raw_num = (isset($ans->response_number) && $ans->response_number !== null && $ans->response_number !== '')
-                    ? (string)$ans->response_number
-                    : (string)($ans->response_text ?? '');
+                $num_field  = (isset($ans->response_number) && $ans->response_number !== null && $ans->response_number !== '')
+                    ? (string)$ans->response_number : '';
+                $text_field = (string)($ans->response_text ?? '');
+
+                // response_number e DECIMAL: identificadores longos cabem sem
+                // perda. Mas se algum registro antigo estiver em notacao
+                // cientifica (coluna FLOAT em versao anterior), os digitos
+                // podem ter se perdido — nesse caso o texto original, quando
+                // existir, e mais confiavel.
+                $num_corrupted = ($num_field !== '' && preg_match('/[eE][+-]?\d+$/', $num_field));
+
+                if ($num_corrupted && trim($text_field) !== '') {
+                    $raw_num = $text_field;
+                } else {
+                    $raw_num = ($num_field !== '') ? $num_field : $text_field;
+                }
+
                 // Se parece data armazenada como número (ddmmyy/ddmmyyyy) → formata
                 $as_date = self::try_normalize_as_date($raw_num);
                 if ($as_date !== null) return $as_date;
@@ -466,10 +480,29 @@ class Excel
         $s = trim((string)$v);
         if ($s === '') return '';
 
-        // Identificadores (telefone, CPF, CEP) nao sao quantidades: limpar a
-        // pontuacao produziria lixo como "3498421-5272" a partir de
-        // "(34) 98421-5272". Quando so restam digitos e sao 7 ou mais,
-        // devolve APENAS os digitos — formato limpo e comparavel.
+        // 1) DECIMAL do banco com casas decimais nulas:
+        //    "38998595903.00000000000000000000" -> "38998595903".
+        //    Precisa vir ANTES de qualquer limpeza: remover a pontuacao
+        //    concatenaria os zeros decimais ao numero, gerando a cauda
+        //    "3899859590300000000000...".
+        if (preg_match('/^([+-]?\d+)[.,]0+$/', $s, $m)) {
+            return $m[1];
+        }
+
+        // 2) Notacao cientifica ("3.4991477473E+22"): identificador longo
+        //    gravado em coluna FLOAT. Reconstroi a partir da mantissa.
+        if (preg_match('/^([+-]?)(\d+)(?:[.,](\d+))?[eE][+-]?\d+$/', $s, $m)) {
+            $sign = ($m[1] === '-') ? '-' : '';
+            $digits = $m[2] . (isset($m[3]) ? $m[3] : '');
+            $digits = rtrim($digits, '0');          // remove zeros finais espurios
+            if ($digits === '') $digits = '0';
+            return $sign . $digits;
+        }
+
+        // 3) Identificadores (telefone, CPF, CEP) nao sao quantidades: limpar a
+        //    pontuacao produziria lixo como "3498421-5272" a partir de
+        //    "(34) 98421-5272". Quando so restam digitos e sao 7 ou mais,
+        //    devolve APENAS os digitos — formato limpo e comparavel.
         $digits_only = preg_replace('/\D/', '', $s);
         if (strlen($digits_only) >= 7 && !preg_match('/[,.]\d{1,2}$/', $s)) {
             return $digits_only;
